@@ -417,7 +417,7 @@ class DetectDiffFixtureTest(unittest.TestCase):
             cls._detect_block = textwrap.dedent(run.group("body"))
         return cls._detect_block
 
-    def _run_scenario(self, base_files, mutate):
+    def _run_scenario(self, base_files, mutate, base="pr"):
         import subprocess
         import tempfile
         block = self._load_detect_block()
@@ -446,11 +446,19 @@ class DetectDiffFixtureTest(unittest.TestCase):
             mutate(repo)
             git("add", "-A")
             git("commit", "-qm", "head")
+            if base == "pr":
+                pr_base, merge_base = base_sha, ""
+            elif base == "merge":
+                pr_base, merge_base = "", base_sha
+            elif base == "fallback":
+                pr_base, merge_base = "", ""
+            else:
+                raise ValueError("unknown base entry path: %r" % base)
             env = {
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "GATE_EVENT": "pull_request",
-                "GATE_PR_BASE": base_sha,
-                "GATE_MERGE_BASE": "",
+                "GATE_PR_BASE": pr_base,
+                "GATE_MERGE_BASE": merge_base,
                 "GATE_MODE": "enforcing",
                 "GATE_LABELS": "",
                 "GITHUB_OUTPUT": out,
@@ -466,6 +474,44 @@ class DetectDiffFixtureTest(unittest.TestCase):
                 [sys.executable, "-"], input=script, capture_output=True,
                 text=True, env=gate_env, cwd=tmp, timeout=60)
         return changed, gate.returncode
+
+    def _run_detect_only(self, base_files, mutate, pr_base, merge_base=""):
+        import subprocess
+        import tempfile
+        block = self._load_detect_block()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            out = os.path.join(tmp, "github_output.txt")
+            open(out, "w").close()
+
+            def git(*args, **kwargs):
+                return subprocess.run(
+                    ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     *args], cwd=repo, capture_output=True, text=True,
+                    timeout=60, check=True, **kwargs)
+
+            git("init", "-qb", "main")
+            for path, content in base_files.items():
+                full = os.path.join(repo, path)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as handle:
+                    handle.write(content)
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            mutate(repo)
+            git("add", "-A")
+            git("commit", "-qm", "head")
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "GATE_PR_BASE": pr_base,
+                "GATE_MERGE_BASE": merge_base,
+                "GITHUB_OUTPUT": out,
+            }
+            detect = subprocess.run(
+                ["bash", "-c", block], cwd=repo, capture_output=True,
+                text=True, env=env, timeout=60)
+        return detect
 
     @staticmethod
     def _big_src(tag="a", edits=()):
@@ -540,6 +586,254 @@ class DetectDiffFixtureTest(unittest.TestCase):
             "renamed test must stay in the changed list: %r" % (changed,))
         self.assertEqual(rc, 0)
 
+    def test_all_entry_paths_agree_on_rename_and_edit(self):
+        def mutate(repo):
+            self._rename(repo, "src/a.py", "src/b.py")
+            with open(os.path.join(repo, "src/b.py"), "a") as handle:
+                handle.write("# edited line one\n# edited line two\n")
+        base = {"src/a.py": self._big_src()}
+        for entry in ("pr", "merge", "fallback"):
+            changed, rc = self._run_scenario(dict(base), mutate, base=entry)
+            self.assertEqual(changed, ["src/b.py"], entry)
+            self.assertEqual(rc, 1, entry)
+
+    def test_merge_base_used_instead_of_head_fallback(self):
+        import subprocess
+        import tempfile
+        block = self._load_detect_block()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            out = os.path.join(tmp, "github_output.txt")
+            open(out, "w").close()
+
+            def git(*args, **kwargs):
+                return subprocess.run(
+                    ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     *args], cwd=repo, capture_output=True, text=True,
+                    timeout=60, check=True, **kwargs)
+
+            git("init", "-qb", "main")
+            os.makedirs(os.path.join(repo, "src"), exist_ok=True)
+            with open(os.path.join(repo, "src/a.py"), "w") as handle:
+                handle.write(self._big_src())
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base_sha = git("rev-parse", "HEAD").stdout.strip()
+            with open(os.path.join(repo, "src/other.py"), "w") as handle:
+                handle.write(self._big_src(tag="other"))
+            git("add", "-A")
+            git("commit", "-qm", "middle")
+            with open(os.path.join(repo, "src/a.py"), "a") as handle:
+                handle.write("# head edit\n")
+            git("add", "-A")
+            git("commit", "-qm", "head")
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "GATE_PR_BASE": "",
+                "GATE_MERGE_BASE": base_sha,
+                "GITHUB_OUTPUT": out,
+            }
+            detect = subprocess.run(
+                ["bash", "-c", block], cwd=repo, capture_output=True,
+                text=True, env=env, timeout=60)
+            self.assertEqual(detect.returncode, 0, detect.stderr[-2000:])
+            with open(os.path.join(repo, "changed.txt")) as handle:
+                changed = [line.strip() for line in handle if line.strip()]
+            # Correct: diffs the merge-group base (both middle + head files).
+            # Mutant GATE_BASE="${GATE_PR_BASE:-}" falls back to HEAD~1 and
+            # lists only the head edit.
+            self.assertIn("src/other.py", changed, changed)
+            self.assertIn("src/a.py", changed, changed)
+
+    def test_fallback_diffs_head_minus_one(self):
+        import subprocess
+        import tempfile
+        block = self._load_detect_block()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            out = os.path.join(tmp, "github_output.txt")
+            open(out, "w").close()
+
+            def git(*args, **kwargs):
+                return subprocess.run(
+                    ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     *args], cwd=repo, capture_output=True, text=True,
+                    timeout=60, check=True, **kwargs)
+
+            git("init", "-qb", "main")
+            os.makedirs(os.path.join(repo, "src"), exist_ok=True)
+            with open(os.path.join(repo, "src/a.py"), "w") as handle:
+                handle.write(self._big_src())
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            with open(os.path.join(repo, "src/other.py"), "w") as handle:
+                handle.write(self._big_src(tag="other"))
+            git("add", "-A")
+            git("commit", "-qm", "middle")
+            with open(os.path.join(repo, "src/a.py"), "a") as handle:
+                handle.write("# head edit\n")
+            git("add", "-A")
+            git("commit", "-qm", "head")
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "GATE_PR_BASE": "",
+                "GATE_MERGE_BASE": "",
+                "GITHUB_OUTPUT": out,
+            }
+            detect = subprocess.run(
+                ["bash", "-c", block], cwd=repo, capture_output=True,
+                text=True, env=env, timeout=60)
+            self.assertEqual(detect.returncode, 0, detect.stderr[-2000:])
+            with open(os.path.join(repo, "changed.txt")) as handle:
+                changed = [line.strip() for line in handle if line.strip()]
+            # Correct: HEAD~1..HEAD lists only the head edit. A HEAD~2
+            # mutant would also list the middle commit's file.
+            self.assertEqual(changed, ["src/a.py"], changed)
+
+    def test_unresolvable_base_fails_closed(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "src/a.py"), "a") as handle:
+                handle.write("# edited\n")
+        detect = self._run_detect_only(
+            {"src/a.py": self._big_src()}, mutate,
+            pr_base="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        self.assertNotEqual(
+            detect.returncode, 0,
+            "an unreadable diff must fail the step (pipefail), never "
+            "produce an empty changed list and a passing gate")
+
+    def test_nonascii_src_edit_fails(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "src/café.py"), "a") as handle:
+                handle.write("# edited\n")
+        changed, rc = self._run_scenario(
+            {"src/café.py": self._big_src()}, mutate)
+        self.assertIn("src/café.py", changed, changed)
+        self.assertFalse(
+            any(path.startswith('"') for path in changed),
+            "quoted octal path leaked into changed.txt: %r" % (changed,))
+        self.assertEqual(rc, 1)
+
+    def test_nonascii_test_counts_as_evidence(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "src/a.py"), "a") as handle:
+                handle.write("# edited\n")
+            os.makedirs(os.path.join(repo, "tests"), exist_ok=True)
+            with open(os.path.join(repo, "tests/tést_a.py"), "w") as handle:
+                handle.write("def test_it():\n    assert True\n")
+        changed, rc = self._run_scenario(
+            {"src/a.py": self._big_src()}, mutate)
+        self.assertIn("src/a.py", changed, changed)
+        self.assertTrue(
+            any("t_a.py" in path for path in changed),
+            "non-ASCII test file missing from changed list: %r" % (changed,))
+        self.assertEqual(rc, 0)
+
+
+class AdoptionSnippetFixtureTest(unittest.TestCase):
+    """Pin the ADOPTION.md caller snippet adopters copy verbatim.
+
+    The snippet was rewritten with the same --diff-filter=AMR + R100 drop
+    as the gate, but no test ran it: AMR->AM, dropping the awk stage, or
+    --name-status->--name-only all passed every check while silently
+    re-opening the rename-and-edit hole for copy-paste adopters.
+    """
+
+    ADOPTION = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "templates", "org-github", "test-missing", "ADOPTION.md",
+    )
+    _block = None
+
+    @classmethod
+    def _load_block(cls):
+        import re
+        import textwrap
+        if cls._block is None:
+            text = open(cls.ADOPTION).read()
+            region = re.search(
+                r"(?m)^  detect:\n(.*?)(?=^  \w)",
+                text, re.DOTALL)
+            assert region, "detect job not found in ADOPTION.md"
+            run = re.search(
+                r"(?m)^(?P<ind>\s*)run: \|\s*$\n(?P<body>(?:(?P=ind) +\S.*\n?)+)",
+                region.group(1))
+            assert run, "detect run block not found in ADOPTION.md"
+            cls._block = textwrap.dedent(run.group("body"))
+        return cls._block
+
+    def _run_adoption(self, base_files, mutate):
+        import subprocess
+        import tempfile
+        block = self._load_block()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            out = os.path.join(tmp, "github_output.txt")
+            open(out, "w").close()
+
+            def git(*args, **kwargs):
+                return subprocess.run(
+                    ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     *args], cwd=repo, capture_output=True, text=True,
+                    timeout=60, check=True, **kwargs)
+
+            git("init", "-qb", "main")
+            for path, content in base_files.items():
+                full = os.path.join(repo, path)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as handle:
+                    handle.write(content)
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base_sha = git("rev-parse", "HEAD").stdout.strip()
+            mutate(repo)
+            git("add", "-A")
+            git("commit", "-qm", "head")
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "GATE_PR_BASE": base_sha,
+                "GITHUB_OUTPUT": out,
+            }
+            detect = subprocess.run(
+                ["bash", "-c", block], cwd=repo, capture_output=True,
+                text=True, env=env, timeout=60)
+            assert detect.returncode == 0, detect.stderr[-2000:]
+            with open(os.path.join(repo, "changed.txt")) as handle:
+                changed = [line.strip() for line in handle if line.strip()]
+        return changed
+
+    @staticmethod
+    def _big_src(tag="a"):
+        lines = ["# %s line %d" % (tag, i) for i in range(60)]
+        return "\n".join(lines) + "\n"
+
+    def test_rename_and_edit_lists_new_path(self):
+        def mutate(repo):
+            os.rename(os.path.join(repo, "src/a.py"),
+                      os.path.join(repo, "src/b.py"))
+            with open(os.path.join(repo, "src/b.py"), "a") as handle:
+                handle.write("# edited line one\n# edited line two\n")
+        changed = self._run_adoption({"src/a.py": self._big_src()}, mutate)
+        self.assertEqual(changed, ["src/b.py"], changed)
+
+    def test_pure_rename_lists_nothing(self):
+        def mutate(repo):
+            os.rename(os.path.join(repo, "src/a.py"),
+                      os.path.join(repo, "src/b.py"))
+        changed = self._run_adoption({"src/a.py": self._big_src()}, mutate)
+        self.assertEqual(changed, [], changed)
+
+    def test_nonascii_src_lists_unquoted(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "src/café.py"), "a") as handle:
+                handle.write("# edited\n")
+        changed = self._run_adoption({"src/café.py": self._big_src()},
+                                     mutate)
+        self.assertIn("src/café.py", changed, changed)
+
 
 class WorkflowWiringTest(unittest.TestCase):
     """Pin the workflow env/output wiring the behavioural matrix cannot see.
@@ -594,7 +888,7 @@ class WorkflowWiringTest(unittest.TestCase):
     def test_diff_excludes_deleted_and_pure_renames(self):
         text = self._text()
         diff_lines = [line for line in text.splitlines()
-                      if "git diff " in line]
+                      if "diff --name-status" in line]
         self.assertTrue(diff_lines, "no git diff line found")
         for line in diff_lines:
             self.assertIn("--diff-filter=AMR", line,
@@ -609,6 +903,40 @@ class WorkflowWiringTest(unittest.TestCase):
             self.assertNotIn("--diff-filter=AM ", line + " ",
                              "bare AM filter drops every rename: %s"
                              % line.strip())
+
+    def test_diff_leaves_paths_unquoted(self):
+        text = self._text()
+        diff_lines = [line for line in text.splitlines()
+                      if "diff --name-status" in line]
+        self.assertTrue(diff_lines, "no git diff line found")
+        for line in diff_lines:
+            self.assertIn("core.quotePath=false", line,
+                          "diff line must list non-ASCII paths unquoted: %s"
+                          % line.strip())
+
+    def test_detect_run_block_sets_pipefail(self):
+        import re
+        text = self._text()
+        region = re.search(
+            r"(?m)^  detect:\n(.*?)(?=^  \w)", text, re.DOTALL)
+        self.assertIsNotNone(region, "detect job not found")
+        run = re.search(
+            r"(?m)^\s*run: \|\s*$\n((?:\s+\S.*\n?)+)", region.group(1))
+        self.assertIsNotNone(run, "detect run block not found")
+        self.assertIn("set -euo pipefail", run.group(1),
+                      "the git|awk pipeline swallows git failures without "
+                      "pipefail, turning an unreadable diff into a passing gate")
+
+    def test_detect_gate_base_falls_back_to_merge_base(self):
+        text = self._text()
+        self.assertIn("GATE_BASE=\"${GATE_PR_BASE:-${GATE_MERGE_BASE:-}}\"",
+                      text)
+
+    def test_detect_else_branch_lists_new_path_at_head_minus_one(self):
+        text = self._text()
+        self.assertIn("print $NF", text)
+        self.assertIn("HEAD~1 HEAD", text)
+        self.assertNotIn("HEAD~2 HEAD", text)
 
 
 if __name__ == "__main__":

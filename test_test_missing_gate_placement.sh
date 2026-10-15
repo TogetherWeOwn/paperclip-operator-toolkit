@@ -298,6 +298,55 @@ PY
     assert 0 "the detect diff never uses the bare AM filter"
   fi
 
+  grep -q 'core.quotePath=false' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect diff lists non-ASCII paths unquoted (core.quotePath=false)" \
+    "a quoted octal path never matches .py so an untested non-ASCII src silently passes"
+
+  grep -q 'set -euo pipefail' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect run block sets pipefail (git|awk fails closed)" \
+    "without pipefail a git failure writes an empty changed list and the gate passes"
+
+  grep -qF 'GATE_BASE="${GATE_PR_BASE:-${GATE_MERGE_BASE:-}}"' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect job falls back from PR base to merge_group base" \
+    "dropping the merge fallback diffs other queued PRs files with no failing test"
+
+  grep -q 'print $NF' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect else branch lists the new path (print \$NF)" \
+    "printing \$2 lists the old deleted path for renames with no failing test"
+
+  grep -q 'HEAD~1 HEAD' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect fallback diffs HEAD~1 (not HEAD~2)" \
+    "a HEAD~2 fallback diffs two commits of files with no failing test"
+
+  if [[ -f "$STAGE/ADOPTION.md" ]]; then
+    grep -q 'core.quotePath=false' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet lists non-ASCII paths unquoted" \
+      "a copy-paste adopter regains the quoted-path silent pass"
+
+    grep -qF -- '--diff-filter=AMR' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet keeps renames for the R100 drop" \
+      "a copy-paste adopter with bare AM regains the rename-and-edit hole"
+
+    grep -q 'R100' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet drops only pure renames (R100)" \
+      "without the R100 drop a copy-paste adopter false-fails pure renames"
+
+    grep -q -- '--name-status' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet uses --name-status (status-aware drop)" \
+      "--name-only cannot drop pure renames so a copy-paste adopter regains the hole"
+
+    grep -q "awk -F'\\\\t'" "$STAGE/ADOPTION.md" || grep -q 'awk -F' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet keeps the R100 awk stage" \
+      "dropping the awk stage lists pure renames as new src files for adopters"
+
+    grep -q 'set -euo pipefail' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet sets pipefail" \
+      "without pipefail an adopter git failure passes the gate"
+  else
+    assert 1 "the adoption snippet carries the detect pins" \
+      "ADOPTION.md absent -- adopter copy-paste has no pinned snippet"
+  fi
+
   grep -q 'merge_group.base_sha' "$STAGE/test-missing-gate.yml"
   assert $? "the detect job diffs the merge_group base_sha in queue runs" \
     "dropping the merge_group base diffs other queued PRs files with no failing test"

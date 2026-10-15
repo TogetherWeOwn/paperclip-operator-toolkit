@@ -33,9 +33,9 @@ jobs:
           # a renamed-and-edited file (R<100) still gates (see
           # test-missing-gate.yml).
           if [ -n "${GATE_PR_BASE:-}" ]; then
-            git diff --name-status --diff-filter=AMR "${GATE_PR_BASE}" HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt
+            git -c core.quotePath=false diff --name-status --diff-filter=AMR "${GATE_PR_BASE}" HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt
           else
-            git diff --name-status --diff-filter=AMR HEAD~1 HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt || true
+            git -c core.quotePath=false diff --name-status --diff-filter=AMR HEAD~1 HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt || true
           fi
           relevant=$(python3 - <<'PY'
           suffixes = (".py", ".sh", ".js", ".ts", ".mjs")
