@@ -6,7 +6,7 @@ from pathlib import Path
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from repo_placement import classify, main  # noqa: E402
+from repo_placement import _strip_backup, classify, main  # noqa: E402
 
 TRACKER = "TO" + "G" + "-1234"
 
@@ -51,6 +51,15 @@ class Classify(unittest.TestCase):
                      "token.age.orig", "AuthKey_X.p8.bak"):
             with self.subTest(path=path):
                 self.assertEqual(classify(path)[0], "PRIVATE-DATA", path)
+
+    def test_strip_backup_never_consumes_the_whole_name(self):
+        # The length guard keeps a name that is only a backup marker
+        # (".bak", "~") intact instead of stripping it to "".
+        self.assertEqual(_strip_backup(".bak"), ".bak")
+        self.assertEqual(_strip_backup(".orig"), ".orig")
+        self.assertEqual(_strip_backup("~"), "~")
+        self.assertEqual(_strip_backup("a.bak.bak"), "a")
+        self.assertEqual(_strip_backup("a~"), "a")
 
     def test_secret_stem_docs_stay_private_data(self):
         # A full secret/credentials stem is secret material even as docs;
