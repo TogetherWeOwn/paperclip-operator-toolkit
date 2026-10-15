@@ -50,9 +50,11 @@ Already live/staged before this slice (reused, not duplicated):
   `actionlint.yml` / `security-scan.yml` / `squawk.yml` reusable: one gate,
   one aggregator (`tier-0-ok`), fed into each caller's `ci-ok`. A second
   aggregator per scanner would multiply required-check names for no extra
-  signal. Until the gate lands on org main, the day-1 template ships its
-  tier-0 caller disabled (`if: false`): an enabled caller against a missing
-  reusable fails at workflow startup and reports no `ci-ok` at all.
+  signal. Until the gate lands on org main, the day-1 template ships
+  tier-0 as a plain `if: false` job with no `uses:`: a reusable `uses:`
+  is resolved when the workflow loads, so an unresolvable ref fails at
+  workflow startup (even under `if: false`) and reports no `ci-ok` at
+  all; the real caller block lives in BOOTSTRAP as a copy-in snippet.
 - `tier0-report-only.json` / `tier0-required.json` ruleset pair + runbook.
 
 This slice adds:

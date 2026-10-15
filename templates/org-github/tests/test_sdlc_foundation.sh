@@ -198,12 +198,20 @@ else bad "template pr-lint producer missing or lacks merge_group"; fi
 if grep -Eq '^[[:space:]]+uses:' "$PR_LINT"; then
   bad "pr-lint template must stay self-contained (an org uses: would need a pin)"
 else ok "pr-lint template is self-contained (no uses:)"; fi
-if grep -A6 '^  tier-0:' "$TEMPL" | grep -q 'if: false'; then
-  ok "tier-0 ships disabled until its gate is on org main (no startup failure)"
-else bad "tier-0 not disabled (an unfilled pin would suppress ci-ok)"; fi
+if grep -A10 '^  tier-0:' "$TEMPL" | grep -q 'if: false' \
+  && ! grep -A10 '^  tier-0:' "$TEMPL" | grep -Eq '^[[:space:]]+uses:'; then
+  ok "tier-0 ships as a plain disabled job (no uses: to resolve at load)"
+else bad "tier-0 carries a uses: or is not disabled (startup failure, no ci-ok)"; fi
+if [[ "$(grep -c 'uses:[[:space:]]*TogetherWeOwn/' "$TEMPL")" == 1 ]] \
+  && grep -q "template repo's OWN" "$FOUND/BOOTSTRAP-new-repo.md"; then
+  ok "template repo holds one fillable pin and BOOTSTRAP keeps it valid (reports ci-ok)"
+else bad "template ci.yml is not single-pin, or BOOTSTRAP drops the own-pin rule"; fi
 if grep -A8 '^  lint:' "$TEMPL" | grep -q 'needs.changes.outputs'; then
   ok "docs-only PRs skip lint via the changes outputs"
 else bad "lint not gated on changes outputs (docs-only claim false)"; fi
+if grep -A8 '^  lint:' "$TEMPL" | grep -q "github.event_name != 'pull_request'"; then
+  ok "lint always runs on non-PR events (main never skips on an empty self-diff)"
+else bad "lint skips on push to main (changes diffs HEAD against itself)"; fi
 
 hdr "red control: floating uses: must fail the pin check"
 sed 's/@<PINNED_CHANGES_SHA>/@main/' "$TEMPL" > "$TMPD/float.yml"
@@ -253,10 +261,9 @@ else bad "runbook misses exclude/discovery wiring"; fi
 # count: that passed vacuously with the CI step deleted.
 wired_in_ci() {
   grep -Ev '^[[:space:]]*#' "$1" > "$TMPD/noncomments.txt" 2>/dev/null || true
-  grep -Eq '(^|[[:space:]])\./templates/org-github/tests/test_sdlc_foundation\.sh([[:space:]]|$)' "$TMPD/noncomments.txt"
+  grep -Eq '(^|[[:space:]])(\./)?templates/org-github/tests/test_sdlc_foundation\.sh([[:space:]]|$)' "$TMPD/noncomments.txt"
 }
-if [[ -f scripts/verify-fast.sh ]] \
-  && grep -Eq '^[[:space:]]*[^#].*test_sdlc_foundation\.sh' scripts/verify-fast.sh; then
+if [[ -f scripts/verify-fast.sh ]] && wired_in_ci scripts/verify-fast.sh; then
   ok "suite wired into verify-fast"
 elif wired_in_ci .github/workflows/ci.yml; then
   # This public mirror has no scripts/verify-fast.sh; its fast tier is
@@ -271,6 +278,14 @@ if [[ -f .github/workflows/ci.yml ]]; then
     ok "wiring check fails when the CI step is deleted (mentions kept)"
   else bad "wiring check passes with the CI step deleted (control broken)"; fi
 fi
+printf '  # ./templates/org-github/tests/test_sdlc_foundation.sh\n' > "$TMPD/indented-comment.sh"
+if wired_in_ci "$TMPD/indented-comment.sh"; then
+  bad "wiring check counts an indented comment as wired (verify-fast path)"
+else ok "wiring check rejects an indented commented-out mention"; fi
+printf '  ./templates/org-github/tests/test_sdlc_foundation.sh\n' > "$TMPD/indented-run.sh"
+if wired_in_ci "$TMPD/indented-run.sh"; then
+  ok "wiring check counts an indented executed line as wired"
+else bad "wiring check misses an indented executed line"; fi
 
 echo
 echo "sdlc-foundation: $PASS passed, $FAIL failed"

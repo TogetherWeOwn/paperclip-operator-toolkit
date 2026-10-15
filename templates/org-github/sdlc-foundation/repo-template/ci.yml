@@ -1,11 +1,13 @@
 # Day-1 CI caller for a new TogetherWeOwn repo (TOG-24386, staged for the
 # public repo-template repo). Goes to `.github/workflows/ci.yml` in the new
 # repo, alongside `pr-lint.yml` (the org baseline's other required producer).
-# Fill the two <PINNED_*> refs at creation (BOOTSTRAP step 2), then never
-# float them: every `uses:` into the org repo pins a full 40-hex SHA. The
-# tier-0 job ships disabled (`if: false`): its gate is not on org `.github`
-# main yet, so <PINNED_GATE_SHA> cannot be filled today; enable it only with
-# the pin filled from live org main (BOOTSTRAP step 2).
+# Fill the <PINNED_CHANGES_SHA> ref at creation (BOOTSTRAP step 2), then
+# never float it: every `uses:` into the org repo pins a full 40-hex SHA.
+# The tier-0 job ships as a plain disabled job with NO `uses:`: its gate
+# is not on org `.github` main yet, and a reusable `uses:` is resolved when
+# the workflow loads -- an unresolvable ref is a startup failure with no
+# ci-ok, even under `if: false`. When the gate lands on org main, replace
+# the plain job with the BOOTSTRAP copy-in snippet (pin filled, step 2).
 #
 # NEVER add workflow-level `on: pull_request: paths:` here: it would suppress
 # the required `ci-ok` check on filtered-out paths. Job-level `if:` gating
@@ -39,23 +41,23 @@ jobs:
 
   tier-0:
     name: tier-0
-    # FILL: delete this `if:` only after tier-0-quality-gate.yml is on org
-    # `.github` main and <PINNED_GATE_SHA> below is its 40-hex SHA. Enabled
-    # against a missing reusable, the workflow fails at startup and reports
-    # no ci-ok at all; skipped, ci-ok still aggregates green.
+    # Plain disabled job, deliberately NO `uses:` to resolve at workflow
+    # load. Replace with the BOOTSTRAP copy-in snippet once the gate is
+    # on org main; until then it reads `skipped` and ci-ok stays green.
     if: false
-    uses: TogetherWeOwn/.github/.github/workflows/tier-0-quality-gate.yml@<PINNED_GATE_SHA>
-    with:
-      mode: report-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "tier-0 gate not on org main yet; see BOOTSTRAP copy-in snippet"
 
   lint:
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [changes]
-    # Docs-only PRs skip the heavy job (ci-ok counts skipped as pass).
-    # outputs verified against org changes.yml @ 82c5b36: areas/full_run.
-    if: needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).app
+    # Docs-only PRs skip the heavy job (ci-ok counts skipped as pass);
+    # non-PR events always run -- main never skips (empty self-diff).
+    if: github.event_name != 'pull_request' || needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).app
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

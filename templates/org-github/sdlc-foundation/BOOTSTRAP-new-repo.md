@@ -15,7 +15,16 @@ template repo and when cutting a repo from it. No step runs from CI.
    `workflow-templates/pr-lint.yml` to a repo by itself, so the producer
    must ship inside the template. Scrub private card IDs from file content
    first; the staged headers name this card.
-2. Mark it a template repository (Settings > Template repository).
+2. Fill `<PINNED_CHANGES_SHA>` in the template repo's OWN
+   `.github/workflows/ci.yml` with the valid 40-hex pin from live org
+   main (per-repo step 2). The template repo is deliberately NOT on the
+   exclude list (exactly `replay-*` and `.github`), GitHub runs Actions
+   in template repos, and its only org `uses:` is that one fillable pin
+   (the tier-0 job is a plain job with no `uses:`) -- so with the pin
+   filled it reports `ci-ok` and `pr-lint` like any other repo. Keep
+   that pin valid on every template-repo change; an unfilled pin there
+   would strand its PRs under the active baseline.
+3. Mark it a template repository (Settings > Template repository).
 
 ## Per repo: cut from the template (zero per-repo setup)
 
@@ -25,21 +34,32 @@ template repo and when cutting a repo from it. No step runs from CI.
    `.github/workflows/changes.yml` on org `.github` main — fillable today.
    `<PINNED_GATE_SHA>` is BLOCKED: `.github/workflows/tier-0-quality-gate.yml`
    is staged on the tier-0 adoption branch only and is NOT on org main
-   (verified 2026-10-15, org main `82c5b36`). Until it lands on main, keep
-   the template's tier-0 job at `if: false` and do not claim tier-0
-   coverage: never pin an unmerged branch SHA, and never enable the job
-   against the missing reusable (a startup failure reports no `ci-ok`, and
-   an active baseline then blocks every PR). When the gate lands: fill
-   `<PINNED_GATE_SHA>`, delete the `if: false`, and re-run step 4. No `uses:`
-   into the org repo may float on a branch name after this step.
+   (verified 2026-10-15, org main `82c5b36`). The day-1 `ci.yml` therefore
+   ships tier-0 as a plain `if: false` job with NO `uses:` -- nothing to
+   resolve when the workflow loads, so it reads `skipped` and `ci-ok`
+   reports. Do not claim tier-0 coverage and never pin an unmerged branch
+   SHA. When the gate lands on org main, replace the plain job with this
+   copy-in snippet (keeping the job name and the `ci-ok` `needs:` entry),
+   fill `<PINNED_GATE_SHA>` with its 40-hex SHA, and re-run step 4:
+
+   ```yaml
+     tier-0:
+       name: tier-0
+       uses: TogetherWeOwn/.github/.github/workflows/tier-0-quality-gate.yml@<PINNED_GATE_SHA>
+       with:
+         mode: report-only
+   ```
+
+   No `uses:` into the org repo may float on a branch name after this step.
 3. Replace `<OWNING-TEAM>` in `.github/CODEOWNERS` with the owning team.
    Leave `policy-bot.yml.disabled` renamed until the risk-lanes track leaves
    advisory shadow (TOG-24383); the staging-migrate contract applies now.
 4. Open a docs-only PR and a code PR. Acceptance: both report `ci-ok` and
    `pr-lint`; the docs-only PR skips `lint` via the `changes` outputs with
-   `ci-ok` green (`secret-scan` always runs). The tier-0 job must read
-   `skipped` — never a startup failure — until step 2's gate dependency
-   lands, after which it must report green before the repo counts as
+   `ci-ok` green (`secret-scan` always runs; pushes to main always run
+   `lint` -- main never skips). The plain tier-0 job must read `skipped`
+   — never a startup failure — until step 2's copy-in snippet replaces
+   it, after which it must report green before the repo counts as
    day-1 complete.
 5. Merge queue: leave org custom property `merge_queue_ready` unset (false).
    Set it `true` only after all required producing workflows handle
