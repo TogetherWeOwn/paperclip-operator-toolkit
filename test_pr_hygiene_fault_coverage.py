@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -133,10 +134,22 @@ class Coverage(base.SweepCase):
             self.assertTrue(sweep.issue_has_live_work(base.IID))
 
     def test_live_work_fault_redacts_token_shapes(self):
-        sweep.live_work_fault("lookup failed ghp_" + "A" * 20)
-        self.assertNotIn("ghp_" + "A" * 20, self.log_text())
-        self.assertTrue(sweep.RUN["sql_down"])
-        self.assertEqual(len(sweep.RUN["faults"]), 1)
+        for prefix in ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"):
+            with self.subTest(prefix=prefix):
+                sweep.reset_run()
+                token = prefix + "A" * 20
+                sweep.live_work_fault("lookup failed " + token)
+                self.assertNotIn(token, self.log_text())
+                self.assertTrue(sweep.RUN["sql_down"])
+                self.assertEqual(len(sweep.RUN["faults"]), 1)
+
+    def test_api_curl_hang_sets_breaker(self):
+        for code in (7, 28):
+            with self.subTest(code=code):
+                sweep.reset_run()
+                with mock.patch("subprocess.run", curl_proc("", returncode=code)):
+                    self.assertEqual(sweep.api("PATCH", "issues/x", {}), {"_err": f"curl-{code}"})
+                self.assertTrue(sweep.RUN["api_down"])
 
     # --- Mint, cooldown, caps and guards through main() ---
 
@@ -357,6 +370,20 @@ class Coverage(base.SweepCase):
         owner, _why = self._choose([card], branch=base.REF + "-fix")
         self.assertIsNotNone(owner)
 
+    def test_owner_branch_left_boundary(self):
+        card = self._card([], workspace_repo=f"https://github.com/{base.ORG_REPO}")
+        owner, _why = self._choose([card], branch="X" + base.REF + "-fix")
+        self.assertIsNone(owner, "a letter glued to the left of the id must not name the card")
+        owner, _why = self._choose([card], branch=base.REF + "-fix")
+        self.assertIsNotNone(owner)
+
+    def test_owner_workspace_repo_takes_precedence_over_project(self):
+        card = self._card([], workspace_repo="https://github.com/TogetherWeOwn/other-repo",
+                          project_repos=[f"https://github.com/{base.ORG_REPO}"])
+        owner, why = self._choose([card])
+        self.assertIsNone(owner)
+        self.assertIn("not registered", why)
+
     def test_board_query_filters_are_pinned(self):
         self.route_one_green_pr()
         self.assertEqual(self.run_main(), 0)
@@ -502,7 +529,7 @@ class Coverage(base.SweepCase):
         self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", base.pull_list())
         detail = base.pull_detail()
         detail["body"] = ""
-        detail["head"]["repo"] = {"full_name": head_repo_name}
+        detail["head"]["repo"] = None if head_repo_name is None else {"full_name": head_repo_name}
         self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", detail)
         self.proc.docker = self.docker_rows
         self.proc.curl_get = {
@@ -521,6 +548,79 @@ class Coverage(base.SweepCase):
         self._route_branch_pr(base.ORG_REPO)
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(len(self.proc.board_writes()), 1)
+
+    def test_deleted_fork_pr_branch_card_is_not_nudged_end_to_end(self):
+        self._route_branch_pr(None)
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.proc.board_writes(), [],
+                         "a deleted fork (head.repo null) must never steer a board write")
+
+    # --- Round 4 finding 2: board-fact id validation ---
+
+    def _route_facts_pr(self, issue, extra_get=None):
+        self.route_org()
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", base.pull_list())
+        detail = base.pull_detail()
+        detail["body"] = ""
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", detail)
+        self.proc.docker = self.docker_rows
+        self.proc.curl_get = {f"issues/{base.IID}": issue,
+                              f"issues/{base.IID}/work-products": []}
+        self.proc.curl_get.update(extra_get or {})
+
+    def test_board_facts_issue_id_mismatch_is_a_fault(self):
+        self._route_facts_pr({"id": "99999999-8888-7777-6666-555555555555",
+                              "executionWorkspaceId": None, "projectId": None})
+        self.assertEqual(self.run_main(), 1)
+        self.assertTrue(any("board facts invalid" in f for f in sweep.RUN["faults"]))
+        self.assertEqual(self.proc.board_writes(), [])
+
+    def test_board_facts_workspace_id_mismatch_is_a_fault(self):
+        self._route_facts_pr(
+            {"id": base.IID, "executionWorkspaceId": "ws-1", "projectId": None},
+            {"execution-workspaces/ws-1": {"id": "ws-2",
+                                           "repoUrl": f"https://github.com/{base.ORG_REPO}"}})
+        self.assertEqual(self.run_main(), 1)
+        self.assertTrue(any("board facts invalid" in f for f in sweep.RUN["faults"]))
+        self.assertEqual(self.proc.board_writes(), [])
+
+    def test_board_facts_project_id_mismatch_is_a_fault(self):
+        self._route_facts_pr(
+            {"id": base.IID, "executionWorkspaceId": None, "projectId": "proj-1"},
+            {"projects/proj-1": {"id": "proj-2",
+                                 "workspaces": [{"repoUrl": f"https://github.com/{base.ORG_REPO}"}]}})
+        self.assertEqual(self.run_main(), 1)
+        self.assertTrue(any("board facts invalid" in f for f in sweep.RUN["faults"]))
+        self.assertEqual(self.proc.board_writes(), [])
+
+    # --- Round 4 finding 5: cooldown and prune boundaries ---
+
+    def _seed_cooldown(self, age_seconds):
+        key = f"{base.REPO}#7@{base.SHA[:10]}:green"
+        with open(sweep.STATE, "w") as f:
+            json.dump({key: time.time() - age_seconds}, f)
+
+    def test_cooldown_five_hour_old_key_blocks_nudge(self):
+        self.route_one_green_pr()
+        self._seed_cooldown(5 * 3600)
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.proc.board_writes(), [],
+                         "a nudge 5h ago is inside the 6h cooldown")
+
+    def test_cooldown_seven_hour_old_key_allows_nudge(self):
+        self.route_one_green_pr()
+        self._seed_cooldown(7 * 3600)
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(self.proc.board_writes()), 1,
+                         "a nudge 7h ago is outside the 6h cooldown")
+
+    def test_load_state_prunes_entries_older_than_24h(self):
+        now = time.time()
+        with open(sweep.STATE, "w") as f:
+            json.dump({"fresh": now - 23 * 3600, "stale": now - 25 * 3600}, f)
+        state = sweep.load_state()
+        self.assertIn("fresh", state)
+        self.assertNotIn("stale", state)
 
     # --- Round 3 finding 2: live-work SQL predicate text ---
 

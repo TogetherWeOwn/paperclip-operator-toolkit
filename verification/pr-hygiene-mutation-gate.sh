@@ -142,6 +142,21 @@ mutate sql-breaker-not-honoured 'if RUN["sql_down"]: log("sql skipped: docker di
 mutate api-breaker-not-honoured 'if RUN.get("api_down"): log(f"board api skipped: board did not answer earlier in this run: {method} {path}"); return {"_err": "skipped"}' 'if False: log(f"board api skipped: board did not answer earlier in this run: {method} {path}"); return {"_err": "skipped"}' test_api_breaker_skips_next_call
 mutate api-get-breaker-not-honoured 'if RUN.get("api_down"): log(f"board api skipped: board did not answer earlier in this run: GET {path}"); return None' 'if False: log(f"board api skipped: board did not answer earlier in this run: GET {path}"); return None' test_api_get_breaker_skips_next_call
 
+mutate deleted-fork-treated-as-base '(pr["head_repo"] or "")' '(pr["head_repo"] or repo)' test_deleted_fork_pr_branch_card_is_not_nudged_end_to_end
+mutate deleted-fork-crashes 'head_repo = (d["head"].get("repo") or {}).get("full_name")' 'head_repo = d["head"].get("repo").get("full_name")' test_deleted_fork_pr_branch_card_is_not_nudged_end_to_end
+mutate board-issue-id-check-dropped 'if not isinstance(issue, dict) or issue.get("id") != iid or not isinstance(products, list):' 'if not isinstance(issue, dict) or not isinstance(products, list):' test_board_facts_issue_id_mismatch_is_a_fault
+mutate board-workspace-id-check-dropped 'isinstance(workspace, dict) and workspace.get("id") == workspace_id' 'isinstance(workspace, dict)' test_board_facts_workspace_id_mismatch_is_a_fault
+mutate board-project-id-check-dropped 'isinstance(project, dict) and project.get("id") == project_id' 'isinstance(project, dict)' test_board_facts_project_id_mismatch_is_a_fault
+mutate branch-left-boundary-dropped 'pattern = r"(?<![0-9A-Za-z])%s(?![0-9])" % re.escape(identifier)' 'pattern = r"%s(?![0-9])" % re.escape(identifier)' test_owner_branch_left_boundary
+mutate workspace-precedence-dropped 'urls = [card["workspace_repo"]] if card["workspace_repo"] else card["project_repos"]' 'urls = ([card["workspace_repo"]] if card["workspace_repo"] else []) + card["project_repos"]' test_owner_workspace_repo_takes_precedence_over_project
+mutate token-redaction-narrowed 'safe = re.sub(r"(?:gh[pousr]|github_pat)_[A-Za-z0-9_]+", "[redacted]", str(reason))' 'safe = re.sub(r"(?:ghp)_[A-Za-z0-9_]+", "[redacted]", str(reason))' test_live_work_fault_redacts_token_shapes
+mutate cooldown-window-shrunk 'if key in state and now - state[key] < 6 * 3600: continue' 'if key in state and now - state[key] < 6: continue' test_cooldown_five_hour_old_key_blocks_nudge
+mutate cooldown-window-huge 'if key in state and now - state[key] < 6 * 3600: continue' 'if key in state and now - state[key] < 86400 * 365: continue' test_cooldown_seven_hour_old_key_allows_nudge
+mutate state-prune-dropped 'now - v < 86400' 'now - v < 86400000' test_load_state_prunes_entries_older_than_24h
+mutate api-curl-hang-breaker-dropped '        if r.returncode in (7, 28): RUN["api_down"] = True
+        fault(f"board api failed: curl exit {r.returncode}: {method} {path}")' '        if r.returncode in (7,): RUN["api_down"] = True
+        fault(f"board api failed: curl exit {r.returncode}: {method} {path}")' test_api_curl_hang_sets_breaker
+
 reset_stage
 UNCOVERED="$(COVERED="$(printf '%s\n' "${covered[@]}")" SUITE_PATH="$STAGE/$SUITE" python3 - <<'PY'
 import os, pathlib, re
