@@ -30,8 +30,9 @@ class detail and stderr tails) are logged with token-shaped strings redacted.
 import fcntl, http.client, json, os, re, socket, subprocess, sys, tempfile, time, urllib.request, urllib.error
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The live-work guard and owner matching are inlined below (single-file mirror).
-STATE = os.path.join(HERE, "state.json"); LOG = os.path.join(HERE, "sweep.log")
-LOCK = os.path.join(HERE, "sweep.lock")
+STATE_DIR = os.environ.get("PR_HYGIENE_STATE_DIR", "/tmp/pr-hygiene-sweep")
+STATE = os.path.join(STATE_DIR, "state.json"); LOG = os.path.join(STATE_DIR, "sweep.log")
+LOCK = os.path.join(STATE_DIR, "sweep.lock")
 PER_PAGE = 100
 PARK_MARKER = re.compile(r"(?im)^\s*(?:parked until|do not mutate)\b")
 C = os.environ.get("PAPERCLIP_COMPANY_ID", "")  # board company id, from the operator environment
@@ -41,7 +42,7 @@ T = ""  # installation token, read by main() after the mint step
 TOKEN_FILE = os.environ.get("PR_HYGIENE_TOKEN_FILE", "/tmp/gh-inst-token")
 MINT = os.environ.get("PR_HYGIENE_MINT", os.path.expanduser("~/mint-installation-token.sh"))
 CURL_CONFIG = os.environ.get("PR_HYGIENE_CURL_CONFIG", os.path.expanduser("~/.pc.curl"))
-PAUSE = os.path.join(HERE, "PAUSE")
+PAUSE = os.path.join(STATE_DIR, "PAUSE")
 GH_TIMEOUT = 30    # per GitHub request
 GH_BREAKER = 3     # consecutive GitHub network faults before the run stops calling GitHub
 SQL_TIMEOUT = 60   # per docker psql call
@@ -308,7 +309,11 @@ def log(msg):
     line = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + " " + msg
     print(line)
     if not DRY:
-        with open(LOG, "a") as f: f.write(line + "\n")
+        try:
+            os.makedirs(os.path.dirname(LOG) or ".", exist_ok=True)
+            with open(LOG, "a") as f: f.write(line + "\n")
+        except OSError:
+            pass  # stdout already carries the row; a missing log must not crash the sweep
 MSG = {
  "dirty": ("Operator PR-hygiene sweep: {repo} PR #{n} (`{ref}`, head {sha}) **conflicts with main** "
            "(mergeable_state=dirty, {behind} commits behind). GitHub does not run pull_request workflows on a conflicting PR, "
@@ -327,6 +332,8 @@ MAX_NUDGES = 15  # per run (30 min): bounded wake load on the fleet; green first
 def main(argv):
     global DRY
     DRY = "--dry-run" in argv
+    try: os.makedirs(os.path.dirname(LOCK) or ".", exist_ok=True)
+    except OSError: pass
     if os.path.exists(PAUSE): return 0
     lock = acquire_run_lock(LOCK)
     if lock is None:
@@ -350,8 +357,20 @@ def _run(argv):
     REPOS = []
     for page in range(1, 4):
         listing = gh(f"orgs/TogetherWeOwn/repos?per_page=100&page={page}")
-        if not isinstance(listing, list): log(f"org repo list page {page} failed {listing}"); continue
+        if not isinstance(listing, list):
+            # The org is a hard-coded constant, so even a 404 is never an
+            # expected miss here: a token that cannot see the org reads as
+            # "0 PRs" unless counted. Non-404 gh() errors already faulted.
+            if isinstance(listing, dict) and listing.get("_err") == 404:
+                fault(f"org repo list page {page} failed: HTTP 404")
+            elif isinstance(listing, dict) and "_err" in listing:
+                log(f"org repo list page {page} failed {listing}")
+            else:
+                fault(f"org repo list page {page} failed: non-list body ({type(listing).__name__})")
+            continue
         REPOS += [r["name"] for r in listing if isinstance(r, dict) and not r.get("archived")]
+    if not REPOS and not RUN["faults"]:
+        fault("org discovery returned no repositories")
     REPOS = sorted(REPOS, key=lambda r: (FIRST.index(r) if r in FIRST else len(FIRST), r))
     pending = []
     for repo in REPOS:
@@ -359,7 +378,14 @@ def _run(argv):
         page = 1
         while True:  # every open-PR page: the first 100 are not the whole answer on busy repos
             chunk = gh(f"repos/TogetherWeOwn/{repo}/pulls?state=open&per_page={PER_PAGE}&page={page}")
-            if not isinstance(chunk, list): log(f"{repo} list page {page} failed {chunk}"); prs = None; break
+            if not isinstance(chunk, list):
+                # A per-repo 404 may be a logged miss (repo deleted between
+                # the two reads); a non-list 2xx body is never a clean list.
+                if isinstance(chunk, dict) and "_err" in chunk:
+                    log(f"{repo} list page {page} failed {chunk}")
+                else:
+                    fault(f"{repo} list page {page} failed: non-list body ({type(chunk).__name__})")
+                prs = None; break
             prs.extend(chunk)
             if len(chunk) < PER_PAGE: break
             page += 1
@@ -398,7 +424,14 @@ def _run(argv):
             if rows is None: log(f"skip {repo}#{p['number']}: board query unavailable"); continue
             cards = []
             for row in rows.splitlines():
-                iid, ident, status, agent, has_edge = row.split("|")
+                # Agent names are free text and may contain '|': the flag is
+                # the last field, the name is everything after the 3rd '|'.
+                try:
+                    head, has_edge = row.rsplit("|", 1)
+                    iid, ident, status, agent = head.split("|", 3)
+                except ValueError:
+                    fault(f"board row malformed for {repo}#{p['number']}: {_plain(row[:80])}")
+                    continue
                 cards.append({"iid": iid, "identifier": ident, "status": status, "agent": agent, "has_edge": has_edge,
                               **(card_facts(iid) or {"products": None, "workspace_repo": None, "project_repos": []})})
             if not cards: continue
