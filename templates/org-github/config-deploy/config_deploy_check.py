@@ -43,6 +43,86 @@ class Finding:
     message: str
 
 
+@dataclass
+class WorkflowJob:
+    id: str
+    name: str = None
+    uses: bool = False
+    has_matrix: bool = False
+    has_timeout: bool = False
+    is_reusable_workflow: bool = False
+
+    @property
+    def context(self):
+        return self.name if self.name is not None else self.id
+
+
+def _yaml_scalar(value):
+    quote = None
+    escaped = False
+    for i, char in enumerate(value):
+        if quote:
+            if quote == '"' and char == "\\" and not escaped:
+                escaped = True
+                continue
+            if char == quote and not escaped:
+                quote = None
+            escaped = False
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (i == 0 or value[i - 1].isspace()):
+            return value[:i].rstrip()
+    return value.strip()
+
+
+def _workflow_jobs(text):
+    is_reusable_workflow = bool(
+        re.search(r"(?m)^  workflow_call:\s*(?:#.*)?$", text)
+        or re.search(r"(?m)^on:\s*\[[^]]*\bworkflow_call\b[^]]*\]", text)
+        or re.search(r"(?m)^on:\s*\{[^}]*\bworkflow_call\s*:", text)
+    )
+    jobs_match = re.search(r"(?m)^jobs:\s*(?:#.*)?$", text)
+    if not jobs_match:
+        return []
+    jobs_section = text[jobs_match.end():]
+    headers = list(re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", jobs_section))
+    jobs = []
+    for i, header in enumerate(headers):
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(jobs_section)
+        block = jobs_section[header.end():end]
+        name_match = re.search(r"(?m)^ {4}name:\s*(.*?)\s*$", block)
+        name = _yaml_scalar(name_match.group(1)).strip("'\\\"") if name_match else None
+        uses = bool(re.search(r"(?m)^ {4}uses:\s*\S+", block))
+        strategy = re.search(r"(?ms)^ {4}strategy:\s*\n(.*?)(?=^ {4}\S|\Z)", block)
+        has_matrix = bool(strategy and re.search(r"(?m)^ {6}matrix:\s*", strategy.group(1)))
+        has_timeout = bool(re.search(r"(?m)^ {4}timeout-minutes:\s*\S+", block))
+        jobs.append(
+            WorkflowJob(
+                header.group(1), name, uses, has_matrix, has_timeout,
+                is_reusable_workflow,
+            )
+        )
+    return jobs
+
+
+def _job_context_matches(job, context):
+    if job.is_reusable_workflow:
+        return False
+    base = job.context
+    if "${{" in base:
+        pattern = "".join(
+            ".+" if part.startswith("${{") else re.escape(part)
+            for part in re.split(r"(\$\{\{.*?\}\})", base)
+        )
+        if re.fullmatch(pattern, context):
+            return True
+    if base == context and not job.uses and not job.has_matrix:
+        return True
+    if job.has_matrix and context.startswith(f"{base} (") and context.endswith(")"):
+        return len(context) > len(base) + 3
+    return bool(job.uses and context.startswith(f"{base} / "))
+
+
 def _strip_jsonc(text):
     out, in_str, i = [], False, 0
     while i < len(text):
@@ -75,7 +155,7 @@ def _load_wrangler(path):
 
 def _env_keys(path):
     keys = {}
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
         s = line.strip()
         if not s or s.startswith("#") or "=" not in s:
             continue
@@ -151,7 +231,12 @@ def check_tree(root):
         p = root / name
         if not p.is_file():
             continue
-        for key, val in _env_keys(p).items():
+        try:
+            env_keys = _env_keys(p)
+        except OSError as exc:
+            add("ENV_READ", p, f"could not read env example: {exc}")
+            continue
+        for key, val in env_keys.items():
             example_keys.add(key)
             if not ENV_KEY.match(key):
                 add("ENV_KEY_SHAPE", p, f"env key {key!r} is not SCREAMING_SNAKE")
@@ -162,27 +247,19 @@ def check_tree(root):
             add("ENV_CONTRACT", root / "wrangler.json", f"wrangler var {key!r} is not declared in the env example")
 
     # ---- workflows -----------------------------------------------------
-    job_contexts = set()
+    workflow_jobs = []
     wf_dir = root / ".github" / "workflows"
     wf_files = []
     if wf_dir.is_dir():
         wf_files = sorted(wf_dir.glob("*.yml")) + sorted(wf_dir.glob("*.yaml"))
     for p in wf_files:
         text = p.read_text(encoding="utf-8", errors="replace")
-        # job ids (2-space indent) and their display names
-        for m in re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", text):
-            job_contexts.add(m.group(1))
-        for m in re.finditer(r"(?m)^\s+name:\s*(\S.*?)\s*$", text):
-            job_contexts.add(m.group(1).strip("'\""))
-        jobs_section = text.split("jobs:", 1)[-1] if "jobs:" in text else ""
-        job_blocks = re.split(r"(?m)^  [A-Za-z0-9_-]+:\s*$", jobs_section)
-        headers = re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", jobs_section)
-        for hid, block in zip(headers, job_blocks[1:]):
+        jobs = _workflow_jobs(text)
+        workflow_jobs.extend(jobs)
+        for job in jobs:
             # Reusable-workflow caller jobs cannot carry timeout-minutes.
-            if re.search(r"(?m)^\s+uses:\s*\S+", block):
-                continue
-            if "timeout-minutes:" not in block:
-                add("WORKFLOW_TIMEOUT", p, f"job {hid!r} has no `timeout-minutes:`")
+            if not job.uses and not job.has_timeout:
+                add("WORKFLOW_TIMEOUT", p, f"job {job.id!r} has no `timeout-minutes:`")
         for i, line in enumerate(text.splitlines(), start=1):
             if line.lstrip().startswith("#"):
                 continue
@@ -203,14 +280,22 @@ def check_tree(root):
     if req_path.is_file():
         try:
             doc = json.loads(req_path.read_text(encoding="utf-8"))
-            if not isinstance(doc, dict) or not isinstance(doc.get("required", []), list):
+            if not isinstance(doc, dict) or not isinstance(doc.get("required"), list):
                 raise ValueError("required_checks must be an object with a required list")
-            required = [r["context"] for r in doc.get("required", []) if isinstance(r, dict) and r.get("context")]
+            required = []
+            for item in doc["required"]:
+                if (
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("context"), str)
+                    or not item["context"].strip()
+                ):
+                    raise ValueError("each required entry must have a non-empty string context")
+                required.append(item["context"].strip())
         except (ValueError, OSError) as exc:
             add("REQUIRED_CHECKS_PARSE", req_path, f"unparseable required_checks.json: {exc}")
             required = []
         for ctx in required:
-            if ctx not in job_contexts:
+            if not any(_job_context_matches(job, ctx) for job in workflow_jobs):
                 add("REQUIRED_CHECK_MISSING", req_path, f"required check {ctx!r} has no producing job")
 
     return findings

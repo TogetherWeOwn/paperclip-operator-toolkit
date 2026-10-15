@@ -1,27 +1,22 @@
 name: config-deploy
 
 # Shared deterministic config/deploy checks — defined ONCE here.
-# Org home: TogetherWeOwn/.github. Every repo consumes this file via a tiny
-# caller (see the caller template staged alongside this file) so new repos inherit the checks
-# with zero per-repo rule copies:
-#
-#   uses: TogetherWeOwn/paperclip-ops-tooling/.github/workflows/config-deploy.yml@<sha>
-#
-# The checker (.github/scripts/config_deploy_check.py) is stdlib-only, runs
-# offline in under a minute, and fails closed (exit 2 = nothing measured).
-# It becomes a required check org-wide only when the Operator applies the
-# org ruleset in the org ruleset template staged alongside this file; until then it is advisory.
+# Org home: TogetherWeOwn/.github. Consumers call this workflow from a thin
+# per-repo caller. The caller must pin this workflow and checker_ref to the
+# same merged .github commit; see the explicit placeholder in the caller.
 
 on:
   workflow_call:
     inputs:
+      checker_ref:
+        description: "Merged .github commit containing this workflow and checker"
+        type: string
+        required: true
       mode:
         description: "warn prints findings without failing; error fails the job"
         type: string
         required: false
         default: error
-  pull_request:
-    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -29,11 +24,21 @@ permissions:
 jobs:
   config-deploy:
     name: config-deploy
-    runs-on: [self-hosted, two-ephemeral]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: TogetherWeOwn/.github
+          ref: ${{ inputs.checker_ref }}
+          path: .config-deploy
+          persist-credentials: false
+      - name: Verify shared checker content
+        working-directory: .config-deploy/.github/scripts
+        run: echo "bfabcfbd2db283b40415855c307a317a4ed4028891ae59f81aefb66477627283  config_deploy_check.py" | sha256sum --check --status
       - name: Run shared config/deploy checks
-        run: python3 .github/scripts/config_deploy_check.py --root . --mode "${{ inputs.mode || 'error' }}"
+        working-directory: .config-deploy/.github/scripts
+        run: python3 config_deploy_check.py --root "${{ github.workspace }}" --mode "${{ inputs.mode || 'error' }}"

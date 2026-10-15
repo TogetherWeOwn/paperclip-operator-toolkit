@@ -1,15 +1,20 @@
-# Caller template -- copy this ONE file into a consumer repo as
+# Caller template — copy this ONE file into a consumer repo as
 # .github/workflows/config-deploy.yml. It is the only per-repo file.
 # The rules live in the reusable workflow; never copy them per repo.
-# Pin the SHA to the reviewed config-deploy release, then bump centrally.
+# Before adoption, replace both CONFIG_DEPLOY_ORG_GITHUB_SHA markers with the
+# same 40-character commit SHA after the workflow and checker have merged to
+# TogetherWeOwn/.github. The placement gate intentionally rejects other pins.
 name: config-deploy
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
 permissions:
   contents: read
 jobs:
   config-deploy:
-    uses: TogetherWeOwn/paperclip-ops-tooling/.github/workflows/config-deploy.yml@636bc30f461ad4ec3d7e1185181244be0982d7fb
+    uses: TogetherWeOwn/.github/.github/workflows/config-deploy.yml@CONFIG_DEPLOY_ORG_GITHUB_SHA
     with:
+      checker_ref: CONFIG_DEPLOY_ORG_GITHUB_SHA
       mode: error
