@@ -7,11 +7,15 @@
     "ref_name": {
       "include": ["refs/heads/main"],
       "exclude": []
+    },
+    "repository_name": {
+      "include": ["~ALL"],
+      "exclude": []
     }
   },
   "rules": [
     {
-      "type": "required_workflows",
+      "type": "workflows",
       "parameters": {
         "workflows": [
           {

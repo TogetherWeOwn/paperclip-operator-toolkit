@@ -147,7 +147,7 @@ jobs:
           PY
       - name: Upload findings
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@b7c566a772e6ff3b3d0c3c8c19a5beaa33b0d53f4a3 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-missing-findings
           path: test-missing-findings.txt
@@ -163,6 +163,14 @@ jobs:
       - name: Aggregate
         env:
           GATE_MODE: ${{ inputs.mode }}
+          NEEDS_DETECT: ${{ needs.detect.result }}
+          NEEDS_GATE: ${{ needs.test-missing.result }}
         run: |
           set -euo pipefail
-          echo "test-missing gate ran in ${GATE_MODE} mode"
+          echo "test-missing gate ran in ${GATE_MODE} mode (detect=${NEEDS_DETECT}, test-missing=${NEEDS_GATE})"
+          if [[ "${GATE_MODE}" == "enforcing" || "${GATE_MODE}" == "enforce" ]]; then
+            if [[ "${NEEDS_DETECT}" != "success" || "${NEEDS_GATE}" != "success" ]]; then
+              echo "test-missing gate failed in ${GATE_MODE} mode" >&2
+              exit 1
+            fi
+          fi

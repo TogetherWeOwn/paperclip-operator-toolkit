@@ -1116,6 +1116,14 @@ jobs:
       - name: admitted-PR closeout gates are load-bearing (mutation-gated)
         run: ./verification/closeout-ledger-mutation-gate.sh
 
+      # TOG-24380. Deterministic test-missing gate (stdlib only, no network,
+      # no clock) plus its staged org drop. Offline: no API, no credential.
+      - name: test-missing gate suite
+        run: python3 -B -m unittest test_test_missing_gate
+
+      - name: test-missing gate placement suite
+        run: bash test_test_missing_gate_placement.sh
+
       # Host deployment contracts (systemd units, installers) live outside the
       # public tree with their suites; they are covered in their source repo.
 

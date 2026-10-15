@@ -19,8 +19,10 @@
 #   4. the staged org drop exists under templates/org-github/test-missing/
 #      with the reusable workflow_call gate, the pull_request + merge_group
 #      wrapper, the verbatim logic copy, the adoption guide, and the
-#      report-only/active ruleset twins that differ only in enforcement;
-#   5. this repo's warn-only caller calls the org reusable by pinned SHA.
+#      report-only/active ruleset twins that differ only in enforcement.
+#   (This repo's warn-only caller is deliberately NOT part of the mirror: the
+#   staged org pin resolves nowhere yet, so the caller lands in the repin
+#   follow-up and this suite asserts its absence until then.)
 #
 # RED (before the fix): the mirror files are absent, which IS the placement
 # risk reproduced. GREEN (after): all pass. The Builder adds the mirror on
@@ -113,9 +115,19 @@ if [[ -f "$STAGE/test-missing-gate.yml" ]]; then
   assert $? "every staged gate job carries a timeout bound" \
     "an unbounded gate job can hang the required check forever"
 
-  grep -qE "uses:[^@]+@[0-9a-f]{40}" "$STAGE/test-missing-gate.yml"
-  assert $? "staged gate actions are SHA-pinned, never a moving tag" \
-    "a moving tag lets the gate change under repos without review"
+  python3 - "$STAGE/test-missing-gate.yml" <<'PY'
+import re, sys
+key = re.compile(r'^\s*(?:-\s+)?uses:')
+anchored = re.compile(r'uses:\s*\S+@[0-9a-f]{40}(?:\s|$|#)')
+bad = [l.rstrip("\n") for l in open(sys.argv[1]) if key.match(l) and not anchored.search(l)]
+if bad:
+    print("unanchored or non-40-hex pin:")
+    for l in bad:
+        print("  " + l.strip())
+    sys.exit(1)
+PY
+  assert $? "staged gate actions are SHA-pinned to exactly 40 hex, never a moving tag" \
+    "an unanchored prefix match lets a 43-char (unresolvable) ref through"
 fi
 
 [[ -f "$STAGE/test-missing-required.yml" ]]
@@ -174,13 +186,16 @@ assert s1.get("enforcement") == "evaluate", "report-only must evaluate"
 assert s2.get("enforcement") == "active", "required must be active"
 strip = lambda d: {k: v for k, v in d.items() if k not in ("enforcement", "_comment")}
 assert strip(s1) == strip(s2), "twins must differ only in enforcement"
-wfs = [w for r in s1.get("rules", []) if r.get("type") == "required_workflows"
+wfs = [w for r in s1.get("rules", []) if r.get("type") == "workflows"
        for w in r.get("parameters", {}).get("workflows", [])]
-assert wfs, "ruleset must carry a required_workflows entry"
+assert wfs, "ruleset must carry a workflows entry"
 assert any(w.get("repository_id") == "REPO_ID_OF_DOT_GITHUB" for w in wfs), \
     "repository_id stays a string placeholder until the runbook fills it"
+conds = s1.get("conditions", {})
+assert any(k in conds for k in ("repository_name", "repository_id", "repository_property")), \
+    "org rulesets require a repository scope next to ref_name"
 PY
-  assert $? "ruleset twins exist and differ only in enforcement, with a required_workflows placeholder" \
+  assert $? "ruleset twins exist and differ only in enforcement, with a workflows placeholder" \
     "an enforce flip that smuggles a rule change was never measured in report-only"
 else
   assert 1 "ruleset twins exist at templates/org-github/rulesets/test-missing-{report-only,required}.json" \
@@ -198,20 +213,24 @@ else
     "templates/org-github/README.md absent -- staged files have no documented destinations"
 fi
 
-hdr "Wiring: this repo calls the org gate warn-only by pinned SHA"
+hdr "Wiring: caller deferred until the org pin resolves"
 
-[[ -f "$CALLER" ]]
-assert $? "this repo's warn-only caller exists at .github/workflows/test-missing.yml" \
-  "absent -- the gate is staged but this repo does not run it"
-
+# The staged org pin names no commit containing the reusable workflow, and
+# GitHub resolves called workflows at parse time: a caller landing now turns
+# every PR red (0 jobs, "workflow was not found"). The caller lands in the
+# repin follow-up instead; that PR restores the pinned-SHA + warn-mode
+# assertions here.
 if [[ -f "$CALLER" ]]; then
-  grep -qE "uses:[[:space:]]*TogetherWeOwn/\.github/\.github/workflows/\S+@[0-9a-f]{40}" "$CALLER"
-  assert $? "the caller reaches the org reusable by pinned SHA, never a moving tag" \
-    "a moving tag lets the gate change under this repo without review"
+  assert 1 "this repo's warn-only caller stays out until the repin PR lands" \
+    "present with an unresolvable org pin -- every PR gets a red test-missing run at parse time"
+else
+  assert 0 "this repo's warn-only caller stays out until the repin PR lands"
+fi
 
-  grep -q "mode: warn" "$CALLER"
-  assert $? "the caller runs in warn mode" \
-    "warn-first is the rollout rule -- this repo flips to enforce only after its FP rate is measured"
+if [[ -f "$STAGE/test-missing-gate.yml" ]]; then
+  grep -q "needs.detect.result" "$STAGE/test-missing-gate.yml" && grep -q "needs.test-missing.result" "$STAGE/test-missing-gate.yml"
+  assert $? "the test-missing-ok aggregator fails when the gate fails in enforcing mode" \
+    "an aggregator that never reads needs results stays green when the gate fails"
 fi
 
 hdr "Result"

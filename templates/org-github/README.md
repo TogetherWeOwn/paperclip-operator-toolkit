@@ -21,15 +21,15 @@ re-copy, never hand-edit the copy.
 The ruleset payloads are never copied as files; an org admin applies them
 with `gh api`. The two payloads differ only in `enforcement`, so the flip
 from report-only to required smuggles in no rule change. This repo's own
-warn-only caller lives at `.github/workflows/test-missing.yml` and reaches
-the org reusable by pinned SHA, never a moving tag.
+warn-only caller is deliberately NOT part of this change: the staged pin
+names no commit containing the reusable workflow, and GitHub resolves
+called workflows at parse time, so landing a caller now would fail the
+whole workflow on every PR (0 jobs, "workflow not found").
 
-After applying the staged gate to the org repo, the Operator must repin
-that caller to the org-repo merge SHA that first contains
-`test-missing-gate.yml`: the staged pin is a placeholder SHA and does not
-yet resolve to the reusable workflow. Until the repin lands, the caller's
-`test-missing` job reports "workflow not found" (it is in no required set,
-so nothing blocks, but the warn signal does not run).
+After applying the staged gate to the org repo, the follow-up PR adds the
+caller at `.github/workflows/test-missing.yml`, pinned to the org-repo
+merge SHA that first contains `test-missing-gate.yml` — a pinned SHA,
+never a moving tag.
 
 ## Local verification (no credentials)
 
@@ -38,5 +38,5 @@ python3 -B -m unittest test_test_missing_gate
 bash test_test_missing_gate_placement.sh
 ```
 
-Rollback: revert the commit that added this staging directory and the
-caller workflow; no ruleset or credential change is part of this change.
+Rollback: revert the commit that added this staging directory; no ruleset
+or credential change is part of this change.

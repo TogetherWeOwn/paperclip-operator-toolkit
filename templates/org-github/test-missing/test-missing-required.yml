@@ -1,7 +1,7 @@
 # Test-missing required wrapper (TOG-24380, staged for TogetherWeOwn/.github).
 #
 # Thin `pull_request` + `merge_group` wrapper so an org ruleset can require
-# the WORKFLOW via `required_workflows`. Applies at
+# the WORKFLOW via its `workflows` rule. Applies at
 # `.github/workflows/test-missing-required.yml` in TogetherWeOwn/.github.
 # Warn mode here: the wrapper never fails the run; repos flip to enforcing
 # through the reusable gate input once the FP rate is measured under 5%.

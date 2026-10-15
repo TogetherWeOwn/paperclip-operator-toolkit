@@ -78,7 +78,9 @@ Add the caller job name (`test-missing`) to the repo's required aggregator
 `needs:` list. `test-missing-ok` is the gate's only aggregator — never wire
 an individual gate job into a required set. In `warn` mode `test-missing-ok`
 always passes; findings land in the step summary and the
-`test-missing-findings` artifact.
+`test-missing-findings` artifact. In `enforcing`/`enforce` mode it fails the
+run when any gate job fails, so the required context is never green on a
+failed gate.
 
 ## Rollout: warn 24h, then required
 
