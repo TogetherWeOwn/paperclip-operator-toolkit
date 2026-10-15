@@ -30,6 +30,35 @@ jq --argjson excl "$EXCL_JSON" \
 python3 -c "import json; d=json.load(open('/tmp/sdlc-stage1.json')); assert d['enforcement']=='evaluate' and d['conditions']['repository_name']['include']==['*'], 'rendered payload malformed'" && echo payload-valid
 ```
 
+## 1b. Render the blocker payloads (same single exclude list)
+
+The blocker-ledger classes 4-7 payloads (`blocker-classes47-report-only`
+evaluate first, `blocker-classes47-required` for the flip) inject the same
+exclude list — never a second list — plus the Operator-filled numeric
+`repository_id` of `TogetherWeOwn/.github` and the adoption commit `sha`:
+
+```bash
+STAGE=templates/org-github
+EXCL_JSON=$(grep -vE '^\s*(#|$)' $STAGE/sdlc-foundation/repo-exclude-list.txt \
+  | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin]))')
+REPO_ID=$(gh api repos/TogetherWeOwn/.github --jq .id)
+SHA=<adoption-commit-of-the-blocker-gates>
+for f in blocker-classes47-report-only blocker-classes47-required; do
+  jq --argjson excl "$EXCL_JSON" --argjson repo "$REPO_ID" --arg sha "$SHA" \
+    '.conditions.repository_name.exclude = $excl
+     | (.rules[] | select(.type == "workflows") | .parameters.workflows[]) |= (.repository_id = $repo | .sha = $sha)' \
+    $STAGE/rulesets/$f.json > /tmp/$f.json
+done
+python3 -c "import json,glob; [print(f, 'payload-valid') for f in sorted(glob.glob('/tmp/blocker-classes47-*.json')) for d in [json.load(open(f))] if d['conditions']['repository_name']['include']==['*'] and all(isinstance(w['repository_id'], int) and w['ref']=='refs/heads/main' and w['sha'] not in ('', 'PINNED_SHA') for r in d['rules'] if r['type']=='workflows' for w in r['parameters']['workflows'])]"
+```
+
+Applied as shipped (empty `exclude`, `repository_id` 0, `sha`
+`PINNED_SHA`), the required workflows would also target the policy repo
+itself and the read-only `replay-*` mirrors the list excludes. Create the
+evaluate ruleset from `/tmp/blocker-classes47-report-only.json` with step
+2's command (name `blocker-classes47`), then PATCH to
+`/tmp/blocker-classes47-required.json` once its gates measure clean.
+
 ## 2. Stage 1 — evaluate (advisory)
 
 ```bash
