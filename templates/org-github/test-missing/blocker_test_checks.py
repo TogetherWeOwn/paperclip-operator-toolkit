@@ -25,11 +25,17 @@ TEST_DIR_NAMES = ("test", "tests", "__tests__")
 
 
 def is_test_path(path: str) -> bool:
-    """Basename `test_*` / `*_test.*`, or under a test(s)/__tests__ dir."""
+    """Basename `test_*` / `*_test.*` / `*.test.*` / `*.spec.*`,
+    or under a test(s)/__tests__ dir."""
     posix = PurePosixPath(path.replace(os.sep, "/"))
     name = posix.name
+    lower_name = name.lower()
     stem = name.rsplit(".", 1)[0] if "." in name else name
     if name.startswith("test_") or stem.endswith("_test"):
+        return True
+    if ".test." in lower_name or ".spec." in lower_name:
+        return True
+    if lower_name.endswith(".test") or lower_name.endswith(".spec"):
         return True
     return any(part in TEST_DIR_NAMES for part in posix.parts[:-1])
 

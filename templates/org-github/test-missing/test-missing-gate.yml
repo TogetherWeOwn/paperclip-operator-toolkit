@@ -116,8 +116,13 @@ jobs:
           def is_test(p):
               parts = p.replace("\\", "/").split("/")
               name = parts[-1]
+              lower_name = name.lower()
               stem = name.rsplit(".", 1)[0] if "." in name else name
               if name.startswith("test_") or stem.endswith("_test"):
+                  return True
+              if ".test." in lower_name or ".spec." in lower_name:
+                  return True
+              if lower_name.endswith(".test") or lower_name.endswith(".spec"):
                   return True
               return any(d in test_dirs for d in parts[:-1])
 

@@ -248,6 +248,43 @@ PY
   grep -q 'event == "merge_group"' "$STAGE/test-missing-gate.yml"
   assert $? "merge_group runs skip the label-dependent check and rely on the PR-time run" \
     "merge_group payloads carry no labels, so the tests-exempt waiver would never apply in queue"
+
+  # Behavioural-test wiring pins: the embedded gate script regressed
+  # silently under grep-only checks (waiver invert, enforce narrowing,
+  # unknown-mode exit 2 removal, GATE_EVENT mis-wire, merge_group base
+  # drop, and continue-on-error: true all passed 32/0 and 35/0). The unit
+  # matrix executes the extracted script; these pins kill the
+  # non-python mutants at the YAML level.
+  [[ "$(grep -c 'GATE_EVENT: ${{ github.event_name }}' "$STAGE/test-missing-gate.yml")" -ge 2 ]]
+  assert $? "the gate wires GATE_EVENT from github.event_name in detect and check jobs" \
+    "a mis-wired GATE_EVENT silently changes merge_group/push handling with no failing test"
+
+  grep -q 'merge_group.base_sha' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect job diffs the merge_group base_sha in queue runs" \
+    "dropping the merge_group base diffs other queued PRs files with no failing test"
+
+  grep -q "continue-on-error: \${{ inputs.mode == 'warn' }}" "$STAGE/test-missing-gate.yml"
+  assert $? "the gate job fails the run outside warn mode (mode-guarded continue-on-error)" \
+    "forcing continue-on-error true for all modes makes enforcing advisory with no failing test"
+
+  if grep -q "continue-on-error: true" "$STAGE/test-missing-gate.yml"; then
+    assert 1 "the gate job never hard-codes continue-on-error true" \
+      "a literal true keeps enforcing green when the gate finds src without tests"
+  else
+    assert 0 "the gate job never hard-codes continue-on-error true"
+  fi
+
+  grep -q '\.test\.' "$STAGE/test-missing-gate.yml" && grep -q '\.spec\.' "$STAGE/test-missing-gate.yml"
+  assert $? "the embedded is_test treats *.test.* and *.spec.* as tests" \
+    "without the colocated patterns the shipped workflow flags its own test files as src"
+
+  # The behavioural matrix itself must stay: deleting it re-opens the
+  # silent-regression window the 4/5 review found.
+  grep -q "EmbeddedGateScriptTest" "$HERE/test_test_missing_gate.py" && \
+    grep -q "merge_group" "$HERE/test_test_missing_gate.py" && \
+    grep -q "Enforcing" "$HERE/test_test_missing_gate.py"
+  assert $? "the embedded gate script has a behavioural case matrix in the unit suite" \
+    "without the matrix the waiver/mode/merge_group mutants survive both suites again"
 fi
 
 if [[ -f "$STAGE/test-missing-required.yml" ]]; then
