@@ -168,6 +168,17 @@ class TestGuardTest(unittest.TestCase):
         self.assertTrue(findings, "unparseable test must produce a finding")
         self.assertIn("test_broken.py", findings[0])
 
+    def test_valid_shell_and_js_tests_produce_no_findings(self):
+        findings = CHECK.check_test_guards(
+            {
+                "test_deploy.sh": "#!/usr/bin/env bash\nset -euo pipefail\n"
+                                  'test "$(echo hi)" = hi\n',
+                "tests/a.test.js": "import assert from 'node:assert';\n"
+                                   "assert.equal(1 + 1, 2);\n",
+            }
+        )
+        self.assertEqual(findings, [])
+
 
 class MainModeTest(unittest.TestCase):
     def test_warn_mode_exits_zero_despite_findings(self):

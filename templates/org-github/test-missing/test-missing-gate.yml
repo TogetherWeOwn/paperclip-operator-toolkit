@@ -17,6 +17,12 @@
 # live in the staged `blocker_test_checks.py` library; the workflow's
 # embedded v1 check below runs only the src-without-tests rule.
 #
+# MERGE QUEUE: a `merge_group` payload carries no `pull_request.labels`, so
+# the `tests-exempt` waiver cannot be evaluated there. Merge-queue runs
+# therefore skip the check and rely on the PR-time run (the wrapper triggers
+# on both events); a `tests-exempt` PR that passed its PR check is never
+# ejected by the queue.
+#
 # WARN FIRST (the rollout rule): `mode: warn` (the default) never fails the
 # run for its own findings — every gate job sets `continue-on-error`, writes
 # findings to the step summary and to a `test-missing-findings` artifact. A
@@ -90,12 +96,14 @@ jobs:
       - name: Run test-missing checks
         env:
           GATE_MODE: ${{ inputs.mode }}
+          GATE_EVENT: ${{ github.event_name }}
           GATE_CHANGED: ${{ needs.detect.outputs.changed }}
           GATE_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import os
+          event = os.environ.get("GATE_EVENT", "")
           changed = [l.strip() for l in os.environ.get("GATE_CHANGED", "").splitlines() if l.strip()]
           labels = [l.strip() for l in os.environ.get("GATE_MODE", "") and os.environ.get("GATE_LABELS", "").split(",") if l.strip()]
           mode = os.environ.get("GATE_MODE", "warn")
@@ -117,7 +125,12 @@ jobs:
               return not is_test(p) and p.lower().endswith(suffixes)
 
           findings = []
-          if "tests-exempt" not in labels:
+          if event == "merge_group":
+              # No pull_request.labels in this payload: the waiver cannot be
+              # evaluated, so the queue relies on the PR-time run (see
+              # header). Skipping here never ejects a tests-exempt PR.
+              print("test-missing gate: merge_group run relies on the PR-time check")
+          elif "tests-exempt" not in labels:
               src = [f for f in changed if is_src(f)]
               if src and not any(is_test(f) for f in changed):
                   findings += ["src change without tests: %s" % f for f in src]
@@ -168,8 +181,13 @@ jobs:
         run: |
           set -euo pipefail
           echo "test-missing gate ran in ${GATE_MODE} mode (detect=${NEEDS_DETECT}, test-missing=${NEEDS_GATE})"
-          if [[ "${GATE_MODE}" == "enforcing" || "${GATE_MODE}" == "enforce" ]]; then
-            if [[ "${NEEDS_DETECT}" != "success" || "${NEEDS_GATE}" != "success" ]]; then
+          # Fail closed: only warn mode stays green on a failed gate. Any
+          # other value (enforcing, enforce, or a caller typo such as
+          # Enforcing) fails the single required context it wires.
+          if [[ "${NEEDS_DETECT}" != "success" || "${NEEDS_GATE}" != "success" ]]; then
+            if [[ "${GATE_MODE}" == "warn" ]]; then
+              echo "test-missing gate advisory in warn mode, not failing the run"
+            else
               echo "test-missing gate failed in ${GATE_MODE} mode" >&2
               exit 1
             fi

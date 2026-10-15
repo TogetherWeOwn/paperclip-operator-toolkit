@@ -229,8 +229,35 @@ fi
 
 if [[ -f "$STAGE/test-missing-gate.yml" ]]; then
   grep -q "needs.detect.result" "$STAGE/test-missing-gate.yml" && grep -q "needs.test-missing.result" "$STAGE/test-missing-gate.yml"
-  assert $? "the test-missing-ok aggregator fails when the gate fails in enforcing mode" \
+  assert $? "the test-missing-ok aggregator reads both gate needs results" \
     "an aggregator that never reads needs results stays green when the gate fails"
+
+  # Pin the fail-closed fix: the aggregator block must carry an `exit 1`
+  # guarded by mode (warn stays advisory, anything else fails). Deleting the
+  # failing branch removes `exit 1` and must turn this red.
+  python3 - "$STAGE/test-missing-gate.yml" <<'PY'
+import re, sys
+agg = open(sys.argv[1]).read().split("test-missing-ok:")[-1]
+assert re.search(r'if\s+\[\[\s*"\$\{NEEDS_DETECT\}"', agg), "aggregator guards on needs results"
+assert re.search(r'\[\[\s*"\$\{GATE_MODE\}"\s*==\s*"warn"\s*\]\]', agg), "warn stays advisory"
+assert "exit 1" in agg, "aggregator fails the run outside warn mode"
+PY
+  assert $? "the test-missing-ok aggregator fails closed (exit 1) outside warn mode" \
+    "without a mode-guarded exit 1 the always-green aggregator can regress silently"
+
+  grep -q 'event == "merge_group"' "$STAGE/test-missing-gate.yml"
+  assert $? "merge_group runs skip the label-dependent check and rely on the PR-time run" \
+    "merge_group payloads carry no labels, so the tests-exempt waiver would never apply in queue"
+fi
+
+if [[ -f "$STAGE/test-missing-required.yml" ]]; then
+  grep -q '\./\.github/workflows/test-missing-gate\.yml' "$STAGE/test-missing-required.yml"
+  assert $? "the required wrapper calls the co-landed gate path" \
+    "the wrapper and gate land together in TogetherWeOwn/.github -- a renamed path strands the required check"
+
+  grep -q "stage 1" "$STAGE/test-missing-required.yml"
+  assert $? "the required wrapper documents the stage-1 resolution proof" \
+    "the ./ call must prove it resolves in evaluate before stage 2 goes active"
 fi
 
 hdr "Result"

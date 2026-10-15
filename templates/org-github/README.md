@@ -26,6 +26,14 @@ names no commit containing the reusable workflow, and GitHub resolves
 called workflows at parse time, so landing a caller now would fail the
 whole workflow on every PR (0 jobs, "workflow not found").
 
+Stage 1 is also the resolution proof for the wrapper's `./` call to the
+co-landed gate: both files land together in `TogetherWeOwn/.github`, so the
+relative call resolves inside that repo. The Operator confirms the required
+check resolves (rather than reporting 'workflow not found') during stage 1
+`evaluate` before any stage 2 `active` flip; on a resolution failure the
+wrapper is repinned to the full
+`TogetherWeOwn/.github/.github/workflows/test-missing-gate.yml@<sha>` form.
+
 After applying the staged gate to the org repo, the follow-up PR adds the
 caller at `.github/workflows/test-missing.yml`, pinned to the org-repo
 merge SHA that first contains `test-missing-gate.yml` — a pinned SHA,

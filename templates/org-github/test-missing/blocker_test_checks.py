@@ -89,13 +89,18 @@ def _has_assertion(tree: ast.AST) -> bool:
 
 
 def check_test_guards(test_contents) -> list:
-    """One finding per changed test file that is empty, unparseable, or
-    contains zero assertions (vacuous-test guard)."""
+    """One finding per changed Python test file that is empty, unparseable,
+    or contains zero assertions (vacuous-test guard).
+
+    The vacuity parse is Python-only (`ast`): non-Python tests (shell,
+    JS/TS) are skipped, never flagged unparseable."""
     findings = []
     for path in sorted((test_contents or {}).keys()):
         content = (test_contents or {}).get(path) or ""
         if not content.strip():
             findings.append(f"{path}: empty test file (no test content)")
+            continue
+        if not path.lower().endswith(".py"):
             continue
         try:
             tree = ast.parse(content)

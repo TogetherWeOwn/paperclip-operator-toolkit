@@ -6,6 +6,14 @@
 # Warn mode here: the wrapper never fails the run; repos flip to enforcing
 # through the reusable gate input once the FP rate is measured under 5%.
 #
+# CO-LOCATION: this wrapper and the gate land together in
+# TogetherWeOwn/.github (see the destination map in README.md), so the `./`
+# call resolves inside that repo. There is no SHA to pin yet (the gate is
+# unmerged), so stage 1 (`evaluate`) must show the required check resolving
+# before stage 2 flips to `active`; if it ever reports 'workflow not found',
+# repin this call to the full
+# `TogetherWeOwn/.github/.github/workflows/test-missing-gate.yml@<sha>` form.
+#
 # Always-run justification (TOG-14912): this wrapper is the required check
 # itself, so it runs on every PR by definition — there is no narrower
 # trigger to gate on. `timeout-minutes` is rejected on `uses:` jobs by
