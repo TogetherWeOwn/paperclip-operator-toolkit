@@ -26,6 +26,11 @@ on:
         required: false
         default: "warn"
         type: string
+      dialect:
+        description: "postgres (default) or sqlite (Cloudflare D1: skips CONCURRENTLY/USING SQLite rejects)"
+        required: false
+        default: "postgres"
+        type: string
 
 permissions:
   contents: read
@@ -53,6 +58,7 @@ jobs:
       - name: Run migration checks on the PR diff
         env:
           GATE_MODE: ${{ inputs.mode }}
+          GATE_DIALECT: ${{ inputs.dialect }}
           GATE_EVENT: ${{ github.event_name }}
           GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
           GATE_BEFORE: ${{ github.event.before }}
@@ -72,9 +78,19 @@ jobs:
             changed="$(git ls-files)"
           fi
           printf '%s\n' "$changed" > /tmp/blocker-changed.txt
+          # Dialect: explicit `dialect:` input wins; a wrangler config declaring
+          # D1 (`d1_databases`) auto-selects sqlite so D1 repos are not flagged
+          # for Postgres-only CONCURRENTLY/USING that SQLite rejects.
+          dialect="${GATE_DIALECT:-postgres}"
+          if [[ "$dialect" == "postgres" ]]; then
+            if grep -rqi "d1_databases" --include="wrangler.toml" --include="wrangler.json" --include="wrangler.jsonc" . 2>/dev/null; then
+              dialect="sqlite"
+              echo "blocker-migration: D1 detected via wrangler config; using dialect=sqlite"
+            fi
+          fi
           # -I: ignore cwd so a PR-root module (re.py, json.py, glob.py)
           # can never shadow stdlib inside the gate.
-          GATE_CHANGED=/tmp/blocker-changed.txt GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
+          GATE_CHANGED=/tmp/blocker-changed.txt GATE_DIALECT="$dialect" GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
           import os
           import sys
           sys.path.insert(0, os.environ.get("GATE_LOGIC", "blocker-classes47"))
@@ -89,6 +105,7 @@ jobs:
               if line.strip()
           ]
           changed_set = set(changed)
+          dialect = os.environ.get("GATE_DIALECT", "postgres")
           contents = {}
           for path in changed:
               if not (is_migration_path(path) and path.endswith(".sql")):
@@ -98,7 +115,7 @@ jobs:
                       contents[path] = f.read()
               except OSError:
                   pass
-          findings = check_migration_safety(contents) + check_migration_down(
+          findings = check_migration_safety(contents, dialect=dialect) + check_migration_down(
               [p for p in changed if p in changed_set], contents
           )
           if findings:

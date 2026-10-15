@@ -61,86 +61,13 @@ jobs:
           GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
           import glob
           import os
-          import re
           import sys
           sys.path.insert(0, os.environ.get("GATE_LOGIC", ".org-gate-logic/blocker-classes47"))
           from blocker_concurrency_checks import (
               check_migration_seed_same_lock,
               check_workflow_concurrency,
+              job_step_blocks,
           )
-
-
-          def _job_step_blocks(text):
-              """Split workflow text into per-job [{name, run}] step lists.
-
-              Line-based subset parser: follows each `steps:` list, `name:`
-              / `run:` scalars and `run: |` blocks. One block per `steps:`
-              section, so a migrate step in one job never pairs with a seed
-              step in another. Anything unrecognized is skipped; never
-              raises (worst case the seed check sees no steps).
-              """
-              blocks = []
-              lines = (text or "").splitlines()
-              total = len(lines)
-              i = 0
-              while i < total:
-                  if not re.match(r"^\s*steps\s*:\s*(#.*)?$", lines[i]):
-                      i += 1
-                      continue
-                  base = len(lines[i]) - len(lines[i].lstrip(" "))
-                  i += 1
-                  block = []
-                  cur = None
-                  item_indent = base
-                  while i < total:
-                      raw = lines[i]
-                      stripped = raw.strip()
-                      if not stripped or stripped.startswith("#"):
-                          i += 1
-                          continue
-                      indent = len(raw) - len(raw.lstrip(" "))
-                      if indent <= base:
-                          break
-                      item = re.match(r"^(\s*)-\s+(.*)$", raw)
-                      if item and indent > base:
-                          if cur is not None:
-                              block.append(cur)
-                          cur = {"name": "", "run": ""}
-                          item_indent = indent
-                          rest = item.group(2).strip()
-                          if not rest:
-                              i += 1
-                              continue
-                          stripped = rest
-                          indent += 2
-                      if cur is None:
-                          i += 1
-                          continue
-                      key = re.match(r"^(name|run)\s*:\s*(.*)$", stripped)
-                      if key and indent > item_indent:
-                          field, val = key.group(1), key.group(2).strip()
-                          if field == "run" and val in (
-                              "|", ">", "|-", "|+", ">-", ">+",
-                          ):
-                              i += 1
-                              chunk = []
-                              while i < total and (
-                                  not lines[i].strip()
-                                  or len(lines[i]) - len(lines[i].lstrip(" ")) > indent
-                              ):
-                                  if lines[i].strip():
-                                      chunk.append(lines[i].strip())
-                                  i += 1
-                              cur["run"] = "\n".join(chunk)
-                              continue
-                          if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-                              val = val[1:-1]
-                          cur[field] = val
-                      i += 1
-                  if cur is not None:
-                      block.append(cur)
-                  blocks.append([s for s in block if s.get("run")])
-              return blocks
 
 
           workflows = {}
@@ -149,7 +76,7 @@ jobs:
                   workflows[path] = f.read()
           findings = check_workflow_concurrency(workflows)
           for path in sorted(workflows):
-              for block in _job_step_blocks(workflows[path]):
+              for block in job_step_blocks(workflows[path]):
                   for finding in check_migration_seed_same_lock(block):
                       findings.append("%s: %s" % (path, finding))
           if findings:

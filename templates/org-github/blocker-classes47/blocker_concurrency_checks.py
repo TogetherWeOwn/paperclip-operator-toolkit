@@ -16,7 +16,11 @@ ISOLATION_MARKERS = ("--isolated",)
 
 SEED_MARKERS = ("seed",)
 
-_CONCURRENCY_RE = re.compile(r"(?m)^[ \t]*concurrency\s*:")
+_TOP_CONCURRENCY_RE = re.compile(r"(?m)^concurrency\s*:")
+_JOBS_RE = re.compile(r"^(\s*)jobs\s*:\s*(#.*)?$")
+_JOB_KEY_RE = re.compile(r"^(\s*)([\w\-.]+)\s*:\s*(#.*)?$")
+_CONCURRENCY_LINE_RE = re.compile(r"^(\s*)concurrency\s*:")
+_STEPS_RE = re.compile(r"^\s*steps\s*:\s*(#.*)?$")
 
 
 def _contains_any(text, markers):
@@ -30,12 +34,79 @@ def step_runs_migrations(step):
     return _contains_any(step.get("run", ""), MIGRATION_RUN_MARKERS)
 
 
+def _indent_of(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def _migration_job_has_own_concurrency(lines, job_start, job_indent, next_start):
+    """True when the job block declares `concurrency:` directly under the
+    job key (job-key indent + 2) and the same job runs migrations."""
+    block = lines[job_start + 1:next_start]
+    block_text = "\n".join(block)
+    if not _contains_any(block_text, MIGRATION_RUN_MARKERS):
+        return False
+    want = job_indent + 2
+    for raw in block:
+        if not raw.strip() or raw.strip().startswith("#"):
+            continue
+        m = _CONCURRENCY_LINE_RE.match(raw)
+        if m and _indent_of(raw) == want:
+            return True
+    return False
+
+
 def has_concurrency_group(workflow_text):
-    """True when the workflow YAML text declares a top-level or
-    job-level concurrency: block (a job that serialises its own deploy
-    still serialises the migration). Line-anchored heuristic: a
-    `concurrency:` line inside a run script would also match."""
-    return bool(_CONCURRENCY_RE.search(workflow_text or ""))
+    """True when the workflow serialises the migration job.
+
+    Accepts a top-level `concurrency:` (column 0) or a `concurrency:`
+    block directly under the job key whose steps run migrations
+    (job-key indent + 2). A `concurrency:` on an unrelated job, or a
+    `concurrency:` step input (`with:`), does not satisfy the check.
+    Line-anchored heuristic: a `concurrency:` line inside a run script
+    at the same indent would also match.
+    """
+    text = workflow_text or ""
+    if _TOP_CONCURRENCY_RE.search(text):
+        return True
+    lines = text.splitlines()
+    jobs_at = None
+    jobs_indent = None
+    for idx, raw in enumerate(lines):
+        m = _JOBS_RE.match(raw)
+        if m:
+            jobs_at = idx
+            jobs_indent = len(m.group(1).replace("\t", "  "))
+            break
+    if jobs_at is None:
+        return False
+    # Collect job-key starts at jobs_indent + 2.
+    starts = []
+    for idx in range(jobs_at + 1, len(lines)):
+        raw = lines[idx]
+        if not raw.strip() or raw.strip().startswith("#"):
+            continue
+        indent = _indent_of(raw)
+        if indent <= jobs_indent:
+            break
+        if indent == jobs_indent + 2:
+            m = _JOB_KEY_RE.match(raw)
+            if m:
+                starts.append((idx, indent))
+    for si, (start, job_indent) in enumerate(starts):
+        end = starts[si + 1][0] if si + 1 < len(starts) else len(lines)
+        # Trim at dedent to jobs level (next top-level key).
+        for idx in range(start + 1, end):
+            raw = lines[idx]
+            if not raw.strip() or raw.strip().startswith("#"):
+                continue
+            if _indent_of(raw) <= jobs_indent - 2 and raw.strip():
+                # Reached the next top-level section; shouldn't happen
+                # inside jobs, but bound the block anyway.
+                end = idx
+                break
+        if _migration_job_has_own_concurrency(lines, start, job_indent, end):
+            return True
+    return False
 
 
 def check_workflow_concurrency(workflows):
@@ -75,3 +146,81 @@ def check_migration_seed_same_lock(steps):
                     % (step.get("name", "?"), later.get("name", "?"))
                 ]
     return []
+
+
+def job_step_blocks(text):
+    """Split workflow text into per-job [{name, run}] step lists.
+
+    Line-based subset parser: follows each `steps:` list, `name:`
+    / `run:` scalars and `run: |` blocks. One block per `steps:`
+    section, so a migrate step in one job never pairs with a seed
+    step in another. Anything unrecognized is skipped; never
+    raises (worst case the seed check sees no steps).
+    """
+    blocks = []
+    lines = (text or "").splitlines()
+    total = len(lines)
+    i = 0
+    while i < total:
+        if not re.match(r"^\s*steps\s*:\s*(#.*)?$", lines[i]):
+            i += 1
+            continue
+        base = len(lines[i]) - len(lines[i].lstrip(" "))
+        i += 1
+        block = []
+        cur = None
+        item_indent = base
+        while i < total:
+            raw = lines[i]
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                i += 1
+                continue
+            indent = len(raw) - len(raw.lstrip(" "))
+            if indent <= base:
+                break
+            item = re.match(r"^(\s*)-\s+(.*)$", raw)
+            if item and indent > base:
+                if cur is not None:
+                    block.append(cur)
+                cur = {"name": "", "run": ""}
+                item_indent = indent
+                rest = item.group(2).strip()
+                if not rest:
+                    i += 1
+                    continue
+                stripped = rest
+                indent += 2
+            if cur is None:
+                i += 1
+                continue
+            key = re.match(r"^(name|run)\s*:\s*(.*)$", stripped)
+            if key and indent > item_indent:
+                field, val = key.group(1), key.group(2).strip()
+                if field == "run" and val in (
+                    "|", ">", "|-", "|+", ">-", ">+",
+                ):
+                    i += 1
+                    chunk = []
+                    while i < total and (
+                        not lines[i].strip()
+                        or len(lines[i]) - len(lines[i].lstrip(" ")) > indent
+                    ):
+                        if lines[i].strip():
+                            chunk.append(lines[i].strip())
+                        i += 1
+                    cur["run"] = "\n".join(chunk)
+                    continue
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                    val = val[1:-1]
+                cur[field] = val
+            i += 1
+        if cur is not None:
+            block.append(cur)
+        blocks.append([s for s in block if s.get("run")])
+    return blocks
+
+
+# Back-compat alias: the gate heredoc used this name before the parser
+# moved into the lib. New code should use job_step_blocks.
+_job_step_blocks = job_step_blocks
