@@ -476,6 +476,109 @@ assert "$(grep -qv "tog-901-work is" <<< "$OUT" && grep -q "run-sib" <<< "$OUT" 
   "the branch the caller is standing on is not reported as a sibling branch" "$OUT"
 
 # ===========================================================================
+hdr "5a. Local-ref attribution ignores cross-card branch-name substrings."
+# Fixture keys TOG-900 (requested) and TOG-907 (foreign owner) are SYNTHETIC
+# stub-only keys, never real cards. The bug: the local-refs detector matches
+# every local branch whose lowercased name merely CONTAINS the requested key,
+# so another card's branch `tog-907-...-tog-900-...` (TOG-900 only a secondary
+# token) refuses as sibling work. Attribution must follow the PRIMARY card
+# key — the leading `<KEY>-...` prefix — while a branch primarily owned by
+# the requested key, a bare exact match, the same-head/same-commit paths and
+# blind detectors all keep failing closed. Remote branch-name references are
+# pinned in 5b below; the pushed branches there are deleted from the shared
+# origin before this section ends so later start-phase asserts stay hermetic.
+
+# (a) Cross-card substring: another card's branch carrying the requested key
+# only as a secondary token, with real commits ahead of origin/main.
+CROSS="$TMP/crosscard"; mkclone "$CROSS"
+(cd "$CROSS" && git checkout --quiet -b tog-907-bump-pin-so-tog-900-reruns-green && echo cross >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "other card work" && git checkout --quiet main)
+run_guard "$CROSS" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a local branch owned by another card naming this key only secondarily stays clear" "rc=$RC out=$OUT"
+assert "$(grep -q "VERDICT: clear" <<< "$OUT" && echo 0 || echo 1)" \
+  "the cross-card substring verdict is reported as clear" "$OUT"
+
+# (b) Prefix-owned branches still refuse: the requested key is the primary
+# prefix and the branch carries commits ahead of origin/main.
+OWNPREFIX="$TMP/ownprefix"; mkclone "$OWNPREFIX"
+(cd "$OWNPREFIX" && git checkout --quiet -b tog-900-fix-widget-queue && echo own >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "own work" && git checkout --quiet main)
+run_guard "$OWNPREFIX" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a local branch with this card as its primary prefix and ahead exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "tog-900-fix-widget-queue" <<< "$OUT" && echo 0 || echo 1)" \
+  "the prefix-owned local branch is named in the report" "$OUT"
+
+# A bare branch exactly equal to the key is owned work too, not a substring.
+BAREKEY="$TMP/barekey"; mkclone "$BAREKEY"
+(cd "$BAREKEY" && git checkout --quiet -b tog-900 && echo bare >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "bare work" && git checkout --quiet main)
+run_guard "$BAREKEY" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a local branch exactly equal to this card key and ahead exits 1" "rc=$RC out=$OUT"
+
+# ===========================================================================
+hdr "5b. Remote branch-name attribution ignores cross-card substrings."
+# Same primary-prefix rule through the remote detector, isolated: each fresh
+# clone below sees the pushed branch only as a remote-tracking ref.
+
+REMXC="$TMP/remxc-push"; mkclone "$REMXC"
+(cd "$REMXC" && git checkout --quiet -b tog-907-bump-pin-so-tog-900-reruns-remote-green && echo rx >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "other card pushed" \
+   && git push --quiet -u origin tog-907-bump-pin-so-tog-900-reruns-remote-green)
+REMXF="$TMP/remxc-fresh"; mkclone "$REMXF"
+run_guard "$REMXF" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a pushed branch owned by another card naming this key only secondarily stays clear" "rc=$RC out=$OUT"
+
+REMOWN="$TMP/remown-push"; mkclone "$REMOWN"
+(cd "$REMOWN" && git checkout --quiet -b tog-900-remote-widget-work && echo ro >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "own pushed" \
+   && git push --quiet -u origin tog-900-remote-widget-work)
+REMOWNF="$TMP/remown-fresh"; mkclone "$REMOWNF"
+run_guard "$REMOWNF" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a pushed branch with this card as its primary prefix exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "tog-900-remote-widget-work" <<< "$OUT" && echo 0 || echo 1)" \
+  "the prefix-owned pushed branch is named in the report" "$OUT"
+
+# Hermetic cleanup: remove the pushed refs so later start-phase asserts that
+# fetch the shared origin never see them.
+(cd "$REMXC" && git push --quiet origin --delete tog-907-bump-pin-so-tog-900-reruns-remote-green >/dev/null 2>&1) || true
+(cd "$REMOWN" && git push --quiet origin --delete tog-900-remote-widget-work >/dev/null 2>&1) || true
+
+# ===========================================================================
+hdr "5c. Same-head and blind detectors still fail closed."
+# The substring fix must not soften paths that do not depend on branch names.
+
+SAMEWT="$TMP/samewt"; mkclone "$SAMEWT"
+(cd "$SAMEWT" && git checkout --quiet -b wt-primary && echo wt >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "wt head" \
+   && git worktree add --quiet -b wt-secondary "$TMP/wt-secondary-5c" HEAD)
+run_guard "$SAMEWT" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "another worktree on this HEAD under another branch still exits 1" "rc=$RC out=$OUT"
+
+SAMEPR="$TMP/samepr5c"; mkclone "$SAMEPR"
+(cd "$SAMEPR" && git checkout --quiet -b tog-900-work && echo pushme >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "my push")
+run_guard "$SAMEPR" TOG-900 --repo=stub/foreign --phase=prepush
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-head PR claimed by another card still exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the same-head sibling card is still named in the report" "$OUT"
+
+NOORIGIN5C="$TMP/noorigin5c"; git init --quiet -b main "$NOORIGIN5C" && (cd "$NOORIGIN5C" && echo x > a && git add a && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -m x)
+run_guard "$NOORIGIN5C" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "a clone with no origin still exits 3, not 0" "rc=$RC out=$OUT"
+
+SIBLING_GUARD_NO_FETCH=1 run_guard "$CLEAN" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "a deliberately skipped fetch with no finding still exits 3, not 0" "rc=$RC out=$OUT"
+
+# ===========================================================================
 hdr "6. Remote — a pushed branch, and an open PR."
 
 PUSHED="$TMP/pushed"; mkclone "$PUSHED"
