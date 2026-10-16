@@ -76,14 +76,7 @@ def _yaml_scalar(value):
 
 
 def _workflow_triggers(text):
-    """Return (has_workflow_call, has_other_trigger) for the `on:` block.
-
-    A file is caller-only when `workflow_call` is its sole trigger. A
-    workflow that is both reusable and directly triggered (e.g. `on:`
-    `pull_request` plus `workflow_call`, which is common) still reports
-    bare job names on those events, so its jobs must match bare contexts
-    too.
-    """
+    """Return whether workflow_call and any other triggers appear under `on:`."""
     block_match = re.search(r"(?m)^on:\s*(?:#.*)?$", text)
     if block_match:
         rest = text[block_match.end():]
@@ -92,18 +85,29 @@ def _workflow_triggers(text):
             rest,
         )
         on_block = rest[: end.start()] if end else rest
-        triggers = re.findall(r"(?m)^  ([A-Za-z0-9_-]+):", on_block)
+        trigger_indents = [
+            len(match.group(1))
+            for match in re.finditer(r"(?m)^( +)[A-Za-z0-9_-]+:", on_block)
+        ]
+        if trigger_indents:
+            indent = min(trigger_indents)
+            triggers = re.findall(
+                r"(?m)^ {" + str(indent) + r"}([A-Za-z0-9_-]+):\s*(?:#.*)?$",
+                on_block,
+            )
+        else:
+            triggers = []
         has_call = "workflow_call" in triggers
-        return has_call, any(t != "workflow_call" for t in triggers)
+        return has_call, any(trigger != "workflow_call" for trigger in triggers)
     inline = re.search(r"(?m)^on:\s*(.+?)\s*(?:#.*)?$", text)
     if inline:
         parts = [
-            p.rstrip(":")
-            for p in re.split(r"[\s,\[\]{}]+", inline.group(1).strip())
-            if p
+            part.rstrip(":")
+            for part in re.split(r"[\s,\[\]{}]+", inline.group(1).strip())
+            if part
         ]
         has_call = "workflow_call" in parts
-        return has_call, any(p != "workflow_call" for p in parts)
+        return has_call, any(part != "workflow_call" for part in parts)
     return False, False
 
 
@@ -124,13 +128,18 @@ def _workflow_jobs(text):
     if indent == 0:
         return []
     headers = [c for c in candidates if len(c.group(1)) == indent]
-    key = indent + 2
-    sub = indent + 4
-    pad = lambda n: " {" + str(n) + "}"
     jobs = []
     for i, header in enumerate(headers):
         end = headers[i + 1].start() if i + 1 < len(headers) else len(jobs_section)
         block = jobs_section[header.end():end]
+        child_indents = [
+            len(match.group(1))
+            for match in re.finditer(r"(?m)^( +)[A-Za-z0-9_-]+:", block)
+            if len(match.group(1)) > indent
+        ]
+        key = min(child_indents) if child_indents else indent + 2
+        sub = key + 2
+        pad = lambda n: " {" + str(n) + "}"
         name_match = re.search(r"(?m)^" + pad(key) + r"name:\s*(.*?)\s*$", block)
         name = _yaml_scalar(name_match.group(1)).strip("'\\\"") if name_match else None
         uses = bool(re.search(r"(?m)^" + pad(key) + r"uses:\s*\S+", block))

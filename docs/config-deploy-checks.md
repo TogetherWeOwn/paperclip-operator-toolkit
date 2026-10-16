@@ -63,9 +63,28 @@ template for new repos). Verify the reported check context is
    `config-deploy / config-deploy`; it deliberately does not turn on merge
    queues, lock renames, or modify unrelated branch-protection policy. The
    caller also handles
-   `merge_group` checks so it can run with an existing queue. It excludes this
-   toolkit (no caller here) plus the single exclude list entries (`.github`
-   policy repo, `replay-*` mirrors).
+   `merge_group` checks so it can run with an existing queue. Before applying,
+   render the payload's exclusions from the single source of truth and append
+   this toolkit (which has no caller here):
+
+   ```bash
+   STAGE=templates/org-github
+   EXCL_JSON=$(grep -vE '^\s*(#|$)' "$STAGE/sdlc-foundation/repo-exclude-list.txt" \
+     | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin]))')
+   EXCL_JSON="$EXCL_JSON" python3 - <<'PY'
+   import json, os
+   excludes = json.loads(os.environ["EXCL_JSON"])
+   assert excludes, "empty exclude list; refusing to render ruleset"
+   excludes.append("paperclip-operator-toolkit")
+   with open("templates/org-github/config-deploy/org-ruleset.json") as f:
+       ruleset = json.load(f)
+   ruleset["conditions"]["repository_name"]["exclude"] = excludes
+   with open("/tmp/config-deploy-ruleset.json", "w") as f:
+       json.dump(ruleset, f, indent=2)
+       f.write("\n")
+   PY
+   ```
+   Apply `/tmp/config-deploy-ruleset.json`, not the template as-is.
 4. Host scripts must discover repos dynamically with one exclude list;
    no hardcoded repo lists.
 

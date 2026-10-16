@@ -284,14 +284,15 @@ hdr "Org ruleset template and rollout doc"
 if [[ -f "$STAGE/org-ruleset.json" ]]; then
   python3 - "$STAGE/org-ruleset.json" <<'PY'
 import json, sys
+from pathlib import Path
 doc = json.load(open(sys.argv[1]))
 assert doc.get("target") == "branch", "ruleset must target branches"
 refs = doc.get("conditions", {}).get("ref_name", {}).get("include", [])
 assert "refs/heads/main" in refs, "ruleset must cover main"
 repo = doc.get("conditions", {}).get("repository_name", {})
 assert repo.get("include") == ["*"], "ruleset must apply org-wide by default"
-assert repo.get("exclude") == ["paperclip-operator-toolkit", ".github", "replay-*"], \
-    "ruleset exclusions must mirror the single exclude list (.github, replay-*) plus this toolkit, got %s" % (repo.get("exclude"),)
+assert repo.get("exclude") == [], \
+    "template exclusions must be empty and injected from repo-exclude-list.txt at rollout time"
 assert "protected" not in repo, \
     "repository_name must not carry a rename lock: it changes policy org-wide beyond a status-check baseline"
 types = [r.get("type") for r in doc.get("rules", [])]
@@ -305,6 +306,19 @@ assert ctx == ["config-deploy / config-deploy"], \
 strict = [r.get("parameters", {}).get("strict_required_status_checks_policy")
           for r in doc.get("rules", []) if r.get("type") == "required_status_checks"]
 assert strict == [True], "required checks must be strict (branch up to date)"
+exclude_file = Path("templates/org-github/sdlc-foundation/repo-exclude-list.txt")
+exclude_entries = [line.strip() for line in exclude_file.read_text().splitlines()
+                   if line.strip() and not line.lstrip().startswith("#")]
+assert exclude_entries == ["replay-*", ".github"], \
+    "canonical exclusion fixture changed; update the rendering contract"
+rendered_exclude = exclude_entries + ["paperclip-operator-toolkit"]
+rendered = dict(doc)
+rendered["conditions"] = dict(doc["conditions"])
+rendered["conditions"]["repository_name"] = dict(repo)
+rendered["conditions"]["repository_name"]["exclude"] = rendered_exclude
+assert rendered["conditions"]["repository_name"]["exclude"] == \
+    ["replay-*", ".github", "paperclip-operator-toolkit"], \
+    "rendered ruleset must inject the canonical exclusions and toolkit exclusion"
 PY
   assert $? "org ruleset template requires exactly config-deploy / config-deploy on main, strictly, with only the baseline rule and repo exclusions" \
     "a ruleset naming the bare config-deploy (or any non-existent check), adding merge_queue, or adding unrelated branch rules makes the rollout require checks nothing produces"

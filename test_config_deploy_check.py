@@ -337,9 +337,8 @@ class WorkflowLintTest(unittest.TestCase):
                 """.replace("PIN", SHA))
             self.assertIn("WORKFLOW_TIMEOUT", codes(d))
 
-    def test_nonstandard_job_indent_still_requires_timeouts(self):
-        """Fails if a valid 4-space-indented workflow yields no jobs and
-        WORKFLOW_TIMEOUT is silently skipped."""
+    def test_nonstandard_job_indent_with_timeout_passes(self):
+        """Fails if a valid 4-space job timeout is not recognized."""
         with tempfile.TemporaryDirectory() as d:
             write(d, ".github/workflows/ci.yml", """\
                 name: CI
@@ -347,10 +346,38 @@ class WorkflowLintTest(unittest.TestCase):
                 jobs:
                     test:
                         runs-on: ubuntu-latest
+                        timeout-minutes: 5
                         steps:
                             - uses: actions/checkout@PIN
                 """.replace("PIN", SHA))
-            self.assertIn("WORKFLOW_TIMEOUT", codes(d))
+            self.assertNotIn("WORKFLOW_TIMEOUT", codes(d))
+
+    def test_four_space_workflow_call_is_recognized(self):
+        """Fails if a reusable workflow at four-space indentation is
+        mistaken for a direct workflow and bare contexts accepted."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "required_checks.json", json.dumps({"required": [{"context": "config-deploy"}]}))
+            write(d, ".github/workflows/caller.yml", """\
+                name: caller
+                on:
+                    workflow_call:
+                jobs:
+                    config-deploy:
+                        uses: TogetherWeOwn/shared/.github/workflows/deploy.yml@PIN
+                """.replace("PIN", SHA))
+            self.assertIn("REQUIRED_CHECK_MISSING", codes(d))
+
+    def test_four_space_reusable_caller_does_not_require_timeout(self):
+        """Fails if the parser cannot recognize a four-space job-level uses."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, ".github/workflows/caller.yml", """\
+                name: caller
+                on: [push]
+                jobs:
+                    config-deploy:
+                        uses: TogetherWeOwn/shared/.github/workflows/deploy.yml@PIN
+                """.replace("PIN", SHA))
+            self.assertNotIn("WORKFLOW_TIMEOUT", codes(d))
 
     def test_jobs_key_without_readable_jobs_fails_closed(self):
         """Fails if `jobs:` with no parseable headers reports clean."""
