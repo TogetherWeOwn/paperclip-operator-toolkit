@@ -1124,6 +1124,15 @@ jobs:
       - name: admitted-PR closeout ledger suite
         run: python3 -m unittest -v test_pr_closeout_ledger.py
 
+      # Blocker-ledger classes 4-7: deterministic pre-review gates
+      # (migration, API contract, concurrency, lockfile). Logic is stdlib;
+      # acceptance parses delivered workflows with the pinned PyYAML above.
+      # No network, clock or credentials in the suites.
+      - name: blocker-ledger classes 4-7 suites
+        env:
+          PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
+        run: python3 -B -m unittest test_blocker_migration_checks test_blocker_api_contract_checks test_blocker_concurrency_checks test_blocker_lockfile_checks test_blocker_classes47_org_template test_blocker_classes47_round2_regression test_blocker_classes47_round3_regression test_blocker_classes47_round4_regression test_blocker_classes47_round5_regression test_blocker_classes47_review_acceptance test_blocker_classes47_round6_regression test_blocker_classes47_round7_regression test_blocker_classes47_round8_regression test_blocker_classes47_round9_regression test_blocker_classes47_round10_regression test_blocker_classes47_round11_regression test_blocker_classes47_round12_regression test_blocker_classes47_round13_regression test_blocker_classes47_round14_regression test_blocker_classes47_round15_regression test_blocker_classes47_round16_regression
+
       - name: admitted-PR closeout gates are load-bearing (mutation-gated)
         run: ./verification/closeout-ledger-mutation-gate.sh
 
@@ -1157,6 +1166,18 @@ jobs:
 
       - name: review_dedup placement gate
         run: ./test_review_dedup_placement.sh
+
+      - name: pr-hygiene fault-visibility suite
+        run: python3 -m unittest -v test_pr_hygiene_fault_visibility.py
+
+      - name: pr-hygiene fault-visibility placement
+        run: ./test_pr_hygiene_fault_visibility_placement.sh
+
+      - name: pr-hygiene fault-coverage suite
+        run: python3 -m unittest -v test_pr_hygiene_fault_coverage.py
+
+      - name: pr-hygiene gates are load-bearing (mutation-gated)
+        run: ./verification/pr-hygiene-mutation-gate.sh
 
       # Host deployment contracts (systemd units, installers) live outside the
       # public tree with their suites; they are covered in their source repo.
@@ -3481,6 +3502,8 @@ jobs:
             echo "::error::storage_auto_reclaim accepted a write-intent flag" >&2
             exit 1
           fi
+          cd ..
+          python3 -m unittest test_isolated_build_profile test_isolated_idle_ttl test_isolated_profile_matrix
 
       # GARM orphan/stale instance reaper audit on synthetic pool fixtures.
       # The audit is read-only by construction (pool-show reads only, no
@@ -5201,6 +5224,9 @@ jobs:
 
       - name: Plugin CI wiring self-test
         run: python3 scripts/test_plugin_ci_wiring.py
+
+      - name: Repo placement classifier self-test
+        run: python3 scripts/test_repo_placement.py
 
       - name: Disclosure scan over plugins/
         run: bash scripts/disclosure-scan.sh plugins

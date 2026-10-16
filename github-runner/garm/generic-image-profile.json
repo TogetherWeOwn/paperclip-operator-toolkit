@@ -26,11 +26,13 @@
   "labels": {
     "eligible": [
       "self-hosted",
-      "two-ephemeral"
+      "two-ephemeral",
+      "two-selfhosted"
     ],
     "explicitly_ineligible": [
       "two-isolated",
-      "two-selfhosted"
+      "two-test",
+      "two-build"
     ]
   },
   "migration_complete": false,

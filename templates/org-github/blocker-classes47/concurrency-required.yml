@@ -1,0 +1,24 @@
+# Blocker-ledger concurrency required wrapper (staged for TogetherWeOwn/.github).
+#
+# Thin wrapper so an org ruleset can require the WORKFLOW: it re-exports the
+# bare `concurrency` check from the reusable gate. Stays in warn mode until the
+# Operator flips the gate after measuring the false-positive rate. Never
+# hand-edit this file: fix upstream, then re-copy.
+
+name: Blocker concurrency required wrapper
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  concurrency:
+    name: concurrency
+    uses: TogetherWeOwn/.github/.github/workflows/blocker-concurrency-gate.yml@3e82c42a1151f1fb333ffb59650a05bae1a7bec5 # repin to the adoption SHA
+    with:
+      mode: warn
+    permissions:
+      contents: read

@@ -48,6 +48,13 @@ secure-drop/
 *.jsonl.lock
 *.jsonl.lock/
 
+# pr_hygiene_sweep run state (also defaulted outside the checkout via
+# PR_HYGIENE_STATE_DIR): sweep.log carries card ids and agent names.
+state.json
+sweep.log
+sweep.lock
+PAUSE
+
 # Per-operator agent-harness config. Not a secret, but it is local machine state
 # and pins absolute paths that mean nothing on anyone else's checkout.
 .claude/

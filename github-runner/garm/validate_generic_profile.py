@@ -15,8 +15,8 @@ TOOLS = {"runner", "node", "php", "composer", "psql", "docker"}
 PROBES = {"native_build", "ci_postgres", "service_loopback",
           "metadata_denied", "host_services_denied"}
 NETWORK_DENIES = {"metadata_denied", "host_services_denied", "production_denied"}
-ELIGIBLE_LABELS = {"self-hosted", "two-ephemeral"}
-INELIGIBLE_REQUIRED = {"two-isolated", "two-selfhosted"}
+ELIGIBLE_LABELS = {"self-hosted", "two-ephemeral", "two-selfhosted"}
+INELIGIBLE_REQUIRED = {"two-isolated", "two-test", "two-build"}
 RESOURCES = {"cpu": 4, "ram_mib": 8192, "disk_gib": 40,
              "safe_max": 1, "configured_max": 2}
 SIZE_CAPS = {"image_gib": 30, "workspace_gib": 20, "log_retention_days": 30}
@@ -141,7 +141,7 @@ def validate(receipt):
 
     lb = obj(r["labels"], {"eligible", "ineligible"}, "labels")
     eligible = lb["eligible"]
-    require(type(eligible) is list and len(eligible) == 2
+    require(type(eligible) is list and len(eligible) == len(ELIGIBLE_LABELS)
             and set(eligible) == ELIGIBLE_LABELS, "labels.eligible")
     for label in eligible:
         text(label, "labels.eligible")
