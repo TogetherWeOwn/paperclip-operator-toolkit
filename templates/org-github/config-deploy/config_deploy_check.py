@@ -92,7 +92,7 @@ def _workflow_triggers(text):
         if trigger_indents:
             indent = min(trigger_indents)
             triggers = re.findall(
-                r"(?m)^ {" + str(indent) + r"}([A-Za-z0-9_-]+):\s*(?:#.*)?$",
+                r"(?m)^ {" + str(indent) + r"}([A-Za-z0-9_-]+):",
                 on_block,
             )
         else:
@@ -138,7 +138,6 @@ def _workflow_jobs(text):
             if len(match.group(1)) > indent
         ]
         key = min(child_indents) if child_indents else indent + 2
-        sub = key + 2
         pad = lambda n: " {" + str(n) + "}"
         name_match = re.search(r"(?m)^" + pad(key) + r"name:\s*(.*?)\s*$", block)
         name = _yaml_scalar(name_match.group(1)).strip("'\\\"") if name_match else None
@@ -147,8 +146,17 @@ def _workflow_jobs(text):
             r"(?ms)^" + pad(key) + r"strategy:\s*\n(.*?)(?=^" + pad(key) + r"\S|\Z)",
             block,
         )
+        matrix_indent = None
+        if strategy:
+            strategy_indents = [
+                len(match.group(1))
+                for match in re.finditer(r"(?m)^( +)[A-Za-z0-9_-]+:", strategy.group(1))
+            ]
+            if strategy_indents:
+                matrix_indent = min(strategy_indents)
         has_matrix = bool(
-            strategy and re.search(r"(?m)^" + pad(sub) + r"matrix:\s*", strategy.group(1))
+            strategy and matrix_indent is not None
+            and re.search(r"(?m)^ {" + str(matrix_indent) + r"}matrix:\s*", strategy.group(1))
         )
         has_timeout = bool(
             re.search(r"(?m)^" + pad(key) + r"timeout-minutes:\s*\S+", block)

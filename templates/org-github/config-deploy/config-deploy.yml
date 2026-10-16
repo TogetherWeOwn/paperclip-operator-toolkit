@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
       - name: Verify shared checker content
         working-directory: .config-deploy/.github/scripts
-        run: echo "3a01c59fea5db3ac11a614629c377418741ed0f511d6548d17f27844c8e5eac6  config_deploy_check.py" | sha256sum --check --status
+        run: echo "0befb218ced129175b922f6da7afefd1ed5e3e8b3b9e53c959d98efc5d3ba018  config_deploy_check.py" | sha256sum --check --status
       - name: Run shared config/deploy checks
         working-directory: .config-deploy/.github/scripts
         run: python3 config_deploy_check.py --root "${{ github.workspace }}" --mode error
