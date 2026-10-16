@@ -1,0 +1,42 @@
+# Test-missing required wrapper (TOG-24380, staged for TogetherWeOwn/.github).
+#
+# Thin `pull_request` + `merge_group` wrapper so an org ruleset can require
+# the WORKFLOW via its `workflows` rule. Applies at
+# `.github/workflows/test-missing-required.yml` in TogetherWeOwn/.github.
+# Warn mode here: the wrapper never fails the run; repos flip to enforcing
+# through the reusable gate input once the FP rate is measured under 5%.
+#
+# CO-LOCATION: this wrapper and the gate land together in
+# TogetherWeOwn/.github (see the destination map in README.md), so the `./`
+# call resolves inside that repo. There is no SHA to pin yet (the gate is
+# unmerged), so stage 1 (`evaluate`) must show the required check resolving
+# before stage 2 flips to `active`; if it ever reports 'workflow not found',
+# repin this call to the full
+# `TogetherWeOwn/.github/.github/workflows/test-missing-gate.yml@<sha>` form.
+#
+# Always-run justification (TOG-14912): this wrapper is the required check
+# itself, so it runs on every PR by definition — there is no narrower
+# trigger to gate on. `timeout-minutes` is rejected on `uses:` jobs by
+# GitHub schema; the bound lives inside the gate (every gate job carries
+# `timeout-minutes: 5`). Per-repo callers add a `detect` + `needs:`/`if:`
+# front (see ADOPTION.md) so docs-only PRs skip before the gate runs.
+
+name: test-missing-required
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+jobs:
+  test-missing:
+    name: test-missing
+    uses: ./.github/workflows/test-missing-gate.yml
+    with:
+      mode: warn
+    permissions:
+      contents: read
