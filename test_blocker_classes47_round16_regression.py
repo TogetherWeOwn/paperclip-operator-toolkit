@@ -206,11 +206,31 @@ class RunbookStep1bPinTest(unittest.TestCase):
     def test_empty_exclude_render_fails(self):
         # An empty render (wrong STAGE path, empty exclude file, jq step
         # skipped) must not validate even though every other field is
-        # well-formed.
+        # well-formed. Both sides empty so only `assert expected_exclude`
+        # stops it (deleting the assert would print payload-valid).
         self.write(
             "blocker-classes47-test-a.json",
             payload(123, "abc123", exclude=[]))
-        proc = self.run_validator()
+        proc = self.run_validator(excl=[])
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("payload-valid", proc.stdout)
+
+    def test_empty_exclude_env_unset_fails_closed(self):
+        # EXCL_JSON unset (jq step skipped entirely) against an
+        # empty-exclude payload must fail closed; only the
+        # `assert expected_exclude` (via `or "[]"`) stops the
+        # both-empty equality from validating.
+        self.write(
+            "blocker-classes47-test-a.json",
+            payload(123, "abc123", exclude=[]))
+        env = dict(os.environ)
+        env.pop("EXCL_JSON", None)
+        proc = subprocess.run(
+            [sys.executable, "-I", "-"],
+            input=extract_step_1b_script(),
+            capture_output=True, text=True, timeout=30,
+            env=env,
+        )
         self.assertNotEqual(proc.returncode, 0)
         self.assertNotIn("payload-valid", proc.stdout)
 
