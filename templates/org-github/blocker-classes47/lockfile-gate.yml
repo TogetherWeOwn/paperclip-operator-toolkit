@@ -1,0 +1,207 @@
+# Blocker-ledger lockfile gate (staged for TogetherWeOwn/.github).
+#
+# Staged source: this whole `blocker-classes47/` directory lands in the org
+# `.github` repo (`lockfile-gate.yml` at `.github/workflows/`). An Operator
+# applies it there after the source PR merges; repin callers to the adoption
+# SHA at that point. Never hand-edit this file: fix upstream, then re-copy.
+#
+# WHAT THIS IS. One reusable workflow every TogetherWeOwn repo opts into with
+# a single caller (`uses`) line (see ADOPTION.md next to this file). It runs the
+# deterministic lockfile checks (blocker-ledger class 7) BEFORE any review
+# model is involved: manifests changed without their lockfile, and
+# empty or corrupt lockfiles.
+#
+# REPORT-ONLY FIRST: `mode: warn` (the default) never fails the run for its
+# own findings — the job sets `continue-on-error` in warn mode and writes
+# findings to the step summary. Flip to `mode: enforce` once the
+# false-positive rate over the last 20 PRs measures under 5%.
+
+name: Blocker lockfile gate
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn (advisory, never fails) or enforce (findings fail the run)"
+        required: false
+        default: "warn"
+        type: string
+      ignore_manifests:
+        description: "comma- or space-separated manifest basenames to exempt (e.g. 'package.json, Cargo.toml'); repos may also set the BLOCKER_LOCKFILE_IGNORE repo variable (read by this gate with an explicit with: winning when present)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile:
+    name: lockfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ inputs.mode == 'warn' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the org gate logic (single source of truth)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: TogetherWeOwn/.github
+          # Org HEAD at staging time (resolves today); repin to the adoption
+          # SHA when the Operator lands the gate files there.
+          ref: 3e82c42a1151f1fb333ffb59650a05bae1a7bec5
+          path: .org-gate-logic
+          persist-credentials: false
+      - name: Run lockfile checks on the PR diff
+        env:
+          GATE_MODE: ${{ inputs.mode }}
+          GATE_IGNORE_MANIFESTS: ${{ inputs.ignore_manifests || vars.BLOCKER_LOCKFILE_IGNORE || '' }}
+          GATE_EVENT: ${{ github.event_name }}
+          GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          GATE_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$GATE_EVENT" == "pull_request" ]]; then
+            base="$GATE_PR_BASE"
+          elif [[ -n "${GATE_BEFORE:-}" && "$GATE_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            base="$GATE_BEFORE"
+          else
+            base="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
+          fi
+          if [[ -n "$base" ]]; then
+            git cat-file -e "$base" || { echo "base not in local history; failing closed"; exit 1; }
+            # NUL-delimited enumeration: `core.quotepath=off` only stops
+            # quoting of bytes above 0x80 — git still wraps a path in
+            # double quotes with C-style escapes when it contains `"`,
+            # `\`, a tab or another control character, which would fail
+            # `is_manifest()` and silently skip the file in enforce mode.
+            # `-z` never quotes: names are NUL-separated raw bytes and the
+            # heredoc splits on `\0` with `os.fsdecode` (surrogateescape)
+            # so every name round-trips to `open()`, including non-ASCII,
+            # quoted-special, and invalid-UTF-8 paths.
+            git -c core.quotepath=off diff -z --name-only --no-renames --diff-filter=d "$base" HEAD -- > /tmp/blocker-changed.txt
+          else
+            git -c core.quotepath=off ls-files -z > /tmp/blocker-changed.txt
+          fi
+          git -c core.quotepath=off ls-files -z > /tmp/blocker-present.txt
+          # -I: ignore cwd so a PR-root module can never shadow stdlib.
+          # Binary lockfiles (`bun.lockb`) are never opened as UTF-8 text
+          # and `requirements*.txt` never reaches the emptiness check (see
+          # `is_parseable_lockfile`). Manifest contents are read from the
+          # PR checkout so tool-only `pyproject.toml`, the library-crate
+          # hint, and the stdlib-only `go.mod` exemption work in the
+          # delivered workflow — not just in library unit tests. The
+          # `lockfile: none` marker is read from the BASE commit instead
+          # (`git show "$base:$path"`): an opt-out must be merged first,
+          # so a PR that adds the marker in the same diff still fails in
+          # enforce mode (same shape as the PR-added wrangler bypass).
+          GATE_CHANGED=/tmp/blocker-changed.txt GATE_PRESENT=/tmp/blocker-present.txt GATE_BASE="$base" GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+          try:
+              sys.stdout.reconfigure(errors="replace")
+              sys.stderr.reconfigure(errors="replace")
+          except Exception:
+              pass
+          sys.path.insert(0, os.environ.get("GATE_LOGIC", ".org-gate-logic/blocker-classes47"))
+          from blocker_lockfile_checks import (
+              check_lockfile_parseable,
+              check_lockfile_present,
+              is_manifest,
+              is_parseable_lockfile,
+          )
+          import os as _os
+          def _encode_workflow_command_data(value):
+              # GitHub workflow-command escaping: a PR-controlled path
+              # must never emit a raw CR/LF that forges a second ::cmd::
+              # line (or hides later annotations via ::stop-commands::).
+              text = value if isinstance(value, str) else str(value)
+              return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          def _read_nul_list(env_key):
+              raw = open(os.environ[env_key], "rb").read()
+              if b"\x00" in raw:
+                  chunks = raw.split(b"\x00")
+              else:
+                  chunks = re.split(rb"\r?\n", raw)
+              out = []
+              for chunk in chunks:
+                  if not chunk:
+                      continue
+                  try:
+                      name = os.fsdecode(chunk)
+                  except Exception:
+                      name = chunk.decode("utf-8", "replace")
+                  name = name.strip()
+                  if name:
+                      out.append(name)
+              return out
+          changed = _read_nul_list("GATE_CHANGED")
+          present = _read_nul_list("GATE_PRESENT")
+          manifest_contents = {}
+          for path in changed:
+              if not is_manifest(path):
+                  continue
+              try:
+                  with open(path, encoding="utf-8", errors="replace") as f:
+                      manifest_contents[path] = f.read()
+              except (OSError, UnicodeDecodeError, ValueError):
+                  pass
+          marker_contents = {}
+          base = os.environ.get("GATE_BASE", "")
+          if base:
+              for path in changed:
+                  if not is_manifest(path):
+                      continue
+                  # Bytes + replace: `text=True` decodes strictly and a
+                  # base manifest with a non-UTF-8 byte (Latin-1 comment)
+                  # would kill the gate with a traceback in both modes.
+                  try:
+                      read = subprocess.run(
+                          ["git", "show", "%s:%s" % (base, path)],
+                          capture_output=True,
+                      )
+                  except OSError:
+                      continue
+                  if read.returncode == 0:
+                      try:
+                          marker_contents[path] = read.stdout.decode(
+                              "utf-8", "replace")
+                      except (UnicodeDecodeError, ValueError):
+                          pass
+          raw_ignore = os.environ.get("GATE_IGNORE_MANIFESTS", "") or ""
+          ignore_manifests = tuple(
+              piece for piece in re.split(r"[,\s]+", raw_ignore) if piece
+          )
+          lock_contents = {}
+          for path in changed:
+              if not is_parseable_lockfile(path):
+                  continue
+              try:
+                  with open(path, encoding="utf-8", errors="replace") as f:
+                      lock_contents[path] = f.read()
+              except (OSError, UnicodeDecodeError, ValueError):
+                  pass
+          findings = check_lockfile_present(
+              changed, present, manifest_contents, ignore_manifests,
+              marker_contents,
+          ) + check_lockfile_parseable(lock_contents)
+          if findings:
+              print("::warning::blocker-lockfile findings:")
+              for finding in findings:
+                  print("::warning::%s" % _encode_workflow_command_data(finding))
+          else:
+              print("blocker-lockfile: clean")
+          if findings and os.environ.get("GATE_MODE") == "enforce":
+              raise SystemExit(1)
+          PY
+      - name: Summarise findings
+        if: always()
+        env:
+          GATE_STATUS: ${{ job.status }}
+          GATE_MODE: ${{ inputs.mode }}
+        run: 'echo "### blocker-lockfile: $GATE_STATUS (mode $GATE_MODE)" >> "$GITHUB_STEP_SUMMARY"'
