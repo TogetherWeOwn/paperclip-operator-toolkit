@@ -1,0 +1,225 @@
+# Test-missing deterministic gate (TOG-24380, staged for TogetherWeOwn/.github).
+#
+# Ported from paperclip-ops-tooling@<source-sha> (this PR, unmerged at stage
+# time): the Operator re-syncs this copy after the source PR merges, then
+# applies it to TogetherWeOwn/.github at
+# `.github/workflows/test-missing-gate.yml`. Do not hand-edit the port: fix
+# upstream in the source PR, then re-port. The canonical logic lives in
+# `.github/scripts/blocker_test_checks.py` (staged next to this file); the
+# gate below embeds the same rules inline so v1 has zero caller-repo
+# dependencies.
+#
+# WHAT THIS IS. One reusable workflow every TogetherWeOwn repo opts into
+# with a single `uses:` line (see ADOPTION.md next to this file). It runs
+# the blocker-ledger 'test missing/wrong' deterministic checks BEFORE any
+# review model is involved: changed src without changed tests (waived by the
+# `tests-exempt` label). The changed-line coverage and vacuity-guard rules
+# live in the staged `blocker_test_checks.py` library; the workflow's
+# embedded v1 check below runs only the src-without-tests rule.
+#
+# MERGE QUEUE: a `merge_group` payload carries no `pull_request.labels`, so
+# the `tests-exempt` waiver cannot be evaluated there. Merge-queue runs
+# therefore skip the check and rely on the PR-time run (the wrapper triggers
+# on both events); a `tests-exempt` PR that passed its PR check is never
+# ejected by the queue.
+#
+# WARN FIRST (the rollout rule): `mode: warn` (the default) never fails the
+# run for its own findings — the check job sets `continue-on-error` in warn
+# mode, and detect never fails classification (unclassifiable entries flow
+# to the mode-aware check). Findings land in the step summary and in a
+# `test-missing-findings` artifact. A repo flips to `mode: enforcing` only
+# after its false-positive rate over the last 20 PRs measures under 5%.
+#
+# FEEDING ci-ok: this workflow ends in exactly one aggregator,
+# `test-missing-ok` (`if: ${{ !cancelled() }}`), so a consumer repo wires ONE
+# context into its own required aggregator. Never add a second aggregator.
+
+name: Test-missing gate
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn (advisory, never fails) or enforcing/enforce (findings fail the run)"
+        required: false
+        default: "warn"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect changed files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compute changed files
+        id: diff
+        env:
+          GATE_EVENT: ${{ github.event_name }}
+          GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          GATE_MERGE_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          # In a merge_group run there is no pull_request context; diff
+          # against the merge group's base instead of HEAD~1, which would
+          # span other queued PRs' files.
+          # Deleted paths are not present-file changes: a deleted test must
+          # not satisfy the test-evidence check and a deleted src needs no
+          # test. Renames stay in the list except pure renames (R100, no
+          # content change): a renamed-and-edited file (R<100) carries a
+          # content change and must still gate, so --diff-filter=AM (which
+          # drops every rename) is wrong here. (--no-renames would instead
+          # count a pure rename as a new file; the pipeline below keeps
+          # rename detection on and drops only R100 explicitly.)
+          GATE_BASE="${GATE_PR_BASE:-${GATE_MERGE_BASE:-}}"
+          if [ -n "${GATE_BASE}" ]; then
+            git -c core.quotePath=false diff --name-status --diff-filter=AMR "${GATE_BASE}" HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt
+          else
+            git -c core.quotePath=false diff --name-status --diff-filter=AMR HEAD~1 HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt || true
+          fi
+          # core.quotePath=false covers only non-ASCII: a name containing
+          # " or \ stays quoted ("src/a\"b.py") and flows through
+          # unclassified. The check job below fails closed on such entries
+          # outside warn mode (advisory finding in warn). The decision lives
+          # there because detect has no mode context -- a red detect job
+          # would red the required wrapper even in warn mode, contradicting
+          # the header promise.
+          {
+            echo "changed<<EOF"
+            cat changed.txt
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+  test-missing:
+    name: Test-missing checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [detect]
+    continue-on-error: ${{ inputs.mode == 'warn' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run test-missing checks
+        env:
+          GATE_MODE: ${{ inputs.mode }}
+          GATE_EVENT: ${{ github.event_name }}
+          GATE_CHANGED: ${{ needs.detect.outputs.changed }}
+          GATE_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          event = os.environ.get("GATE_EVENT", "")
+          changed = [l.strip() for l in os.environ.get("GATE_CHANGED", "").splitlines() if l.strip()]
+          labels = [l.strip() for l in os.environ.get("GATE_MODE", "") and os.environ.get("GATE_LABELS", "").split(",") if l.strip()]
+          mode = os.environ.get("GATE_MODE", "warn")
+          if mode not in ("warn", "enforcing", "enforce"):
+              print("test-missing gate: unknown mode %r (want warn, enforcing or enforce)" % mode)
+              raise SystemExit(2)
+          suffixes = (".py", ".sh", ".js", ".ts", ".mjs")
+          test_dirs = ("test", "tests", "__tests__")
+
+          def is_test(p):
+              parts = p.replace("\\", "/").split("/")
+              name = parts[-1]
+              lower_name = name.lower()
+              stem = name.rsplit(".", 1)[0] if "." in name else name
+              if name.startswith("test_") or stem.endswith("_test"):
+                  return True
+              if ".test." in lower_name or ".spec." in lower_name:
+                  return True
+              if lower_name.endswith(".test") or lower_name.endswith(".spec"):
+                  return True
+              return any(d in test_dirs for d in parts[:-1])
+
+          def is_src(p):
+              return not is_test(p) and p.lower().endswith(suffixes)
+
+          findings = []
+          if event == "merge_group":
+              # No pull_request.labels in this payload: the waiver cannot be
+              # evaluated, so the queue relies on the PR-time run (see
+              # header). Skipping here never ejects a tests-exempt PR.
+              print("test-missing gate: merge_group run relies on the PR-time check")
+          else:
+              quoted = [f for f in changed if f.startswith('"')]
+              if quoted:
+                  # core.quotePath=false leaves " and \ quoted, so such an
+                  # entry is unclassifiable and would otherwise silently
+                  # pass. Fail closed outside warn; in warn the finding
+                  # below stays advisory (this job carries
+                  # continue-on-error in warn mode).
+                  findings += ["unclassifiable quoted path: %s" % f
+                               for f in quoted]
+              if "tests-exempt" not in labels:
+                  src = [f for f in changed if is_src(f)]
+                  if src and not any(is_test(f) for f in changed):
+                      findings += ["src change without tests: %s" % f for f in src]
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          # The artifact is written in THIS job: each job gets a fresh
+          # runner filesystem, so a file from the detect job cannot be
+          # uploaded here.
+          with open("test-missing-findings.txt", "w") as h:
+              if findings:
+                  for f in findings:
+                      h.write("- %s\n" % f)
+              else:
+                  h.write("test-missing gate: no findings\n")
+          if findings:
+              print("test-missing gate findings:")
+              for f in findings:
+                  print("- %s" % f)
+              if summary:
+                  with open(summary, "a") as h:
+                      h.write("## test-missing gate\n")
+                      for f in findings:
+                          h.write("- %s\n" % f)
+          else:
+              print("test-missing gate: no findings")
+          if findings and mode in ("enforcing", "enforce"):
+              raise SystemExit(1)
+          PY
+      - name: Upload findings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-missing-findings
+          path: test-missing-findings.txt
+          if-no-files-found: warn
+
+  test-missing-ok:
+    name: test-missing-ok
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [detect, test-missing]
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Aggregate
+        env:
+          GATE_MODE: ${{ inputs.mode }}
+          NEEDS_DETECT: ${{ needs.detect.result }}
+          NEEDS_GATE: ${{ needs.test-missing.result }}
+        run: |
+          set -euo pipefail
+          echo "test-missing gate ran in ${GATE_MODE} mode (detect=${NEEDS_DETECT}, test-missing=${NEEDS_GATE})"
+          # Fail closed: only warn mode stays green on a failed gate. Any
+          # other value (enforcing, enforce, or a caller typo such as
+          # Enforcing) fails the single required context it wires.
+          if [[ "${NEEDS_DETECT}" != "success" || "${NEEDS_GATE}" != "success" ]]; then
+            if [[ "${GATE_MODE}" == "warn" ]]; then
+              echo "test-missing gate advisory in warn mode, not failing the run"
+            else
+              echo "test-missing gate failed in ${GATE_MODE} mode" >&2
+              exit 1
+            fi
+          fi

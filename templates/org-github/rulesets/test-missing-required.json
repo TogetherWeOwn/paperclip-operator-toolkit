@@ -1,0 +1,30 @@
+{
+  "_comment": "TOG-24380 stage 2: org ruleset, ACTIVE (required) no earlier than 24h after stage 1. Same payload as test-missing-report-only.json except enforcement.",
+  "name": "test-missing-gate",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    },
+    "repository_name": {
+      "include": ["~ALL"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "workflows",
+      "parameters": {
+        "workflows": [
+          {
+            "repository_id": "REPO_ID_OF_DOT_GITHUB",
+            "path": ".github/workflows/test-missing-required.yml",
+            "ref": "PINNED_SHA"
+          }
+        ]
+      }
+    }
+  ]
+}
