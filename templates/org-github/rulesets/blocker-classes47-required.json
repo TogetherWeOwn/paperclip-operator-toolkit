@@ -1,0 +1,49 @@
+{
+  "_comment": "Stage 2: org ruleset, ACTIVE. Applied no earlier than 24h after stage 1 (blocker-classes47-report-only.json) once the false-positive rate measures under 5%. The Operator fills the numeric repository_id of TogetherWeOwn/.github and the adoption PINNED_SHA.",
+  "name": "blocker-classes47",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    },
+    "repository_name": {
+      "include": ["*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "workflows",
+      "parameters": {
+        "workflows": [
+          {
+            "repository_id": 0,
+            "path": ".github/workflows/blocker-migration-required.yml",
+            "ref": "refs/heads/main",
+            "sha": "PINNED_SHA"
+          },
+          {
+            "repository_id": 0,
+            "path": ".github/workflows/blocker-api-contract-required.yml",
+            "ref": "refs/heads/main",
+            "sha": "PINNED_SHA"
+          },
+          {
+            "repository_id": 0,
+            "path": ".github/workflows/blocker-concurrency-required.yml",
+            "ref": "refs/heads/main",
+            "sha": "PINNED_SHA"
+          },
+          {
+            "repository_id": 0,
+            "path": ".github/workflows/blocker-lockfile-required.yml",
+            "ref": "refs/heads/main",
+            "sha": "PINNED_SHA"
+          }
+        ]
+      }
+    }
+  ]
+}

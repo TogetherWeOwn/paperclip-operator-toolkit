@@ -1,0 +1,268 @@
+# Blocker-ledger migration gate (staged for TogetherWeOwn/.github).
+#
+# Staged source: this whole `blocker-classes47/` directory lands in the org
+# `.github` repo (`migration-gate.yml` at `.github/workflows/`). An Operator
+# applies it there after the source PR merges; repin callers to the adoption
+# SHA at that point. Never hand-edit this file: fix upstream, then re-copy.
+#
+# WHAT THIS IS. One reusable workflow every TogetherWeOwn repo opts into with
+# a single caller (`uses`) line (see ADOPTION.md next to this file). It runs the
+# deterministic migration checks (blocker-ledger class 4) BEFORE any review
+# model is involved: destructive DDL without a safety ack, non-concurrent
+# index builds, lossy column-type changes, and migrations with no down path.
+#
+# REPORT-ONLY FIRST: `mode: warn` (the default) never fails the run for its
+# own findings — the job sets `continue-on-error` in warn mode and writes
+# findings to the step summary. Flip to `mode: enforce` once the
+# false-positive rate over the last 20 PRs measures under 5%.
+
+name: Blocker migration gate
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn (advisory, never fails) or enforce (findings fail the run)"
+        required: false
+        default: "warn"
+        type: string
+      dialect:
+        description: "auto (default: sqlite iff a wrangler config declares d1_databases with a migrations_dir covering the changed paths) or an explicit postgres|sqlite|postgres-transactional pin (explicit always wins; transactional skips CONCURRENTLY+DOWN for single-transaction forward-only Postgres runners, keeps USING)"
+        required: false
+        default: "auto"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  migration:
+    name: migration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ inputs.mode == 'warn' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the org gate logic (single source of truth)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: TogetherWeOwn/.github
+          # Org HEAD at staging time (resolves today); repin to the adoption
+          # SHA when the Operator lands the gate files there.
+          ref: 3e82c42a1151f1fb333ffb59650a05bae1a7bec5
+          path: .org-gate-logic
+          persist-credentials: false
+      - name: Run migration checks on the PR diff
+        env:
+          GATE_MODE: ${{ inputs.mode }}
+          GATE_DIALECT: ${{ inputs.dialect }}
+          GATE_EVENT: ${{ github.event_name }}
+          GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          GATE_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$GATE_EVENT" == "pull_request" ]]; then
+            base="$GATE_PR_BASE"
+          elif [[ -n "${GATE_BEFORE:-}" && "$GATE_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            base="$GATE_BEFORE"
+          else
+            base="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
+          fi
+          if [[ -n "$base" ]]; then
+            git cat-file -e "$base" || { echo "base not in local history; failing closed"; exit 1; }
+            # NUL-delimited enumeration: `core.quotepath=off` only stops
+            # quoting of bytes above 0x80 — git still wraps a path in
+            # double quotes with C-style escapes when it contains `"`,
+            # `\`, a tab or another control character, which would fail
+            # `is_migration_path()`/`endswith(".sql")` and silently skip
+            # the file in enforce mode. `-z` never quotes: names are
+            # NUL-separated raw bytes and the heredoc splits on `\0`
+            # with `os.fsdecode` (surrogateescape) so every name
+            # round-trips to `open()`, including non-ASCII,
+            # quoted-special, and invalid-UTF-8 paths.
+            git -c core.quotepath=off diff -z --name-only --no-renames --diff-filter=d "$base" HEAD -- > /tmp/blocker-changed.txt
+          else
+            git -c core.quotepath=off ls-files -z > /tmp/blocker-changed.txt
+          fi
+          # Dialect: `auto` (default) resolves via the tested lib helper
+          # `detect_migration_dialect` below; an explicit `postgres`/`sqlite`
+          # input is final and never auto-switched, so a mixed repo can pin
+          # Postgres. Any other value is rejected (no silent fallback to
+          # auto: a `Postgres` typo must fail closed, never weaken checks).
+          # Detection reads wrangler configs from the BASE commit
+          # (`git show "$base:<path>"`), never the PR checkout and never
+          # the PR diff: a PR-added `wrangler.toml` cannot flip this PR's
+          # result. It further requires the wrangler `migrations_dir`
+          # (resolved relative to the config's own directory) to cover a
+          # changed migration path -- a bare `d1_databases` string in a PR
+          # or a commented config line never flips the result.
+          # -I: ignore cwd so a PR-root module (re.py, json.py, glob.py)
+          # can never shadow stdlib inside the gate.
+          case "${GATE_DIALECT:-auto}" in
+            auto|postgres|sqlite|postgres-transactional) ;;
+            *) echo "blocker-migration: unknown dialect: ${GATE_DIALECT:-auto} (want auto|postgres|sqlite|postgres-transactional)"; exit 1;;
+          esac
+          GATE_CHANGED=/tmp/blocker-changed.txt GATE_BASE="$base" GATE_DIALECT="${GATE_DIALECT:-auto}" GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+          try:
+              sys.stdout.reconfigure(errors="replace")
+              sys.stderr.reconfigure(errors="replace")
+          except Exception:
+              pass
+          sys.path.insert(0, os.environ.get("GATE_LOGIC", "blocker-classes47"))
+          from blocker_migration_checks import (
+              check_migration_down,
+              check_migration_safety,
+              detect_migration_dialect,
+              dialect_for_migration_path,
+              is_migration_path,
+          )
+          def _encode_workflow_command_data(value):
+              # GitHub workflow-command escaping: a PR-controlled path
+              # must never emit a raw CR/LF that forges a second ::cmd::
+              # line (or hides later annotations via ::stop-commands::).
+              text = value if isinstance(value, str) else str(value)
+              return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          def _read_nul_list(env_key):
+              raw = open(os.environ[env_key], "rb").read()
+              if b"\x00" in raw:
+                  chunks = raw.split(b"\x00")
+              else:
+                  chunks = re.split(rb"\r?\n", raw)
+              out = []
+              for chunk in chunks:
+                  if not chunk:
+                      continue
+                  try:
+                      name = os.fsdecode(chunk)
+                  except Exception:
+                      name = chunk.decode("utf-8", "replace")
+                  name = name.strip()
+                  if name:
+                      out.append(name)
+              return out
+          changed = _read_nul_list("GATE_CHANGED")
+          changed_set = set(changed)
+          # Wrangler configs come from the BASE commit only: list config
+          # paths at base, then read each one with `git show`. A
+          # PR-added or PR-modified wrangler file is invisible here by
+          # design, so it cannot flip this PR from postgres to sqlite.
+          wrangler_entries = []
+          base = os.environ.get("GATE_BASE", "")
+          if base:
+              # Bytes + replace throughout: `text=True` decodes strictly
+              # and a base file with a non-UTF-8 byte would kill the gate
+              # with a traceback in both modes instead of a finding.
+              try:
+                  listing = subprocess.run(
+                      ["git", "-c", "core.quotepath=off", "ls-tree",
+                       "-r", "--name-only", "-z", base],
+                      capture_output=True,
+                  )
+              except OSError:
+                  listing = None
+              if listing is not None and listing.returncode == 0:
+                  raw_tree = listing.stdout
+                  if b"\x00" in raw_tree:
+                      tree_chunks = raw_tree.split(b"\x00")
+                  else:
+                      tree_chunks = re.split(rb"\r?\n", raw_tree)
+                  for chunk in tree_chunks:
+                      if not chunk:
+                          continue
+                      try:
+                          p = os.fsdecode(chunk).strip()
+                      except Exception:
+                          p = chunk.decode("utf-8", "replace").strip()
+                      if re.search(r"(^|/)wrangler\.(toml|json|jsonc)$", p):
+                          try:
+                              read = subprocess.run(
+                                  ["git", "show", "%s:%s" % (base, p)],
+                                  capture_output=True,
+                              )
+                          except OSError:
+                              continue
+                          if read.returncode == 0:
+                              try:
+                                  wrangler_entries.append((
+                                      p,
+                                      read.stdout.decode(
+                                          "utf-8", "replace"),
+                                  ))
+                              except (UnicodeDecodeError, ValueError):
+                                  pass
+          requested_dialect = os.environ.get("GATE_DIALECT", "auto") or "auto"
+          # Validate even an empty diff. Only auto may infer per-file dialects.
+          pinned_dialect = detect_migration_dialect(requested_dialect)
+          contents = {}
+          unreadable = []
+          for path in changed:
+              if not (is_migration_path(path) and path.endswith(".sql")):
+                  continue
+              try:
+                  with open(path, encoding="utf-8", errors="replace") as f:
+                      contents[path] = f.read()
+              except (OSError, UnicodeDecodeError, ValueError):
+                  # Fail closed: a migration name that reached this point
+                  # passed `is_migration_path` but cannot be opened (stale
+                  # U+FFFD decoding, raw-byte name, permission). Skipping
+                  # would turn the gate clean (exit 0) on an unchecked
+                  # migration; report it instead.
+                  unreadable.append(path)
+          # Explicit pins apply to safety AND down checks for every file.
+          # In auto, only files under a base D1 binding get sqlite rules;
+          # touching a D1 migration never weakens a Postgres sibling.
+          findings = [
+              "%s: migration file unreadable (fail-closed)" % p
+              for p in unreadable
+          ]
+          file_dialects = {}
+          for path, sql in contents.items():
+              dialect = pinned_dialect
+              if requested_dialect == "auto":
+                  dialect = dialect_for_migration_path(
+                      path,
+                      wrangler_texts=[t for _, t in wrangler_entries],
+                      wrangler_paths=[p for p, _ in wrangler_entries],
+                  )
+              file_dialects[path] = dialect
+              print("blocker-migration: %s dialect=%s" % (_encode_workflow_command_data(path), dialect))
+              findings += check_migration_safety({path: sql}, dialect=dialect)
+          down_candidates = [
+              p for p in changed
+              if p in changed_set
+              and is_migration_path(p)
+              and p.endswith(".sql")
+              and (
+                  p.endswith(".down.sql")
+                  or file_dialects.get(p) == "postgres"
+              )
+          ]
+          # `down_candidates` holds only Postgres migrations (plus
+          # `.down.sql` siblings, which the check skips but honours),
+          # so the down check always runs in Postgres mode here;
+          # sqlite (D1 forward-only) files never reach it.
+          findings += check_migration_down(
+              down_candidates, contents, dialect="postgres"
+          )
+          if findings:
+              print("::warning::blocker-migration findings:")
+              for finding in findings:
+                  print("::warning::%s" % _encode_workflow_command_data(finding))
+          else:
+              print("blocker-migration: clean")
+          if findings and os.environ.get("GATE_MODE") == "enforce":
+              raise SystemExit(1)
+          PY
+      - name: Summarise findings
+        if: always()
+        env:
+          GATE_STATUS: ${{ job.status }}
+          GATE_MODE: ${{ inputs.mode }}
+        run: 'echo "### blocker-migration: $GATE_STATUS (mode $GATE_MODE)" >> "$GITHUB_STEP_SUMMARY"'

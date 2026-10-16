@@ -1,0 +1,49 @@
+{
+  "_comment": "Stage 1: org ruleset, EVALUATE (advisory) for the first 24h. The Operator fills the numeric repository_id of TogetherWeOwn/.github and the adoption PINNED_SHA, creates it with the runbook, then flips to blocker-classes47-required.json.",
+  "name": "blocker-classes47",
+  "target": "branch",
+  "enforcement": "evaluate",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    },
+    "repository_name": {
+      "include": ["*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "workflows",
+      "parameters": {
+        "workflows": [
+          {
+            "repository_id": 0,
+            "path": ".github/workflows/blocker-migration-required.yml",
+            "ref": "refs/heads/main",
+            "sha": "PINNED_SHA"
+          },
+          {
+            "repository_id": 0,
+            "path": ".github/workflows/blocker-api-contract-required.yml",
+            "ref": "refs/heads/main",
+            "sha": "PINNED_SHA"
+          },
+          {
+            "repository_id": 0,
+            "path": ".github/workflows/blocker-concurrency-required.yml",
+            "ref": "refs/heads/main",
+            "sha": "PINNED_SHA"
+          },
+          {
+            "repository_id": 0,
+            "path": ".github/workflows/blocker-lockfile-required.yml",
+            "ref": "refs/heads/main",
+            "sha": "PINNED_SHA"
+          }
+        ]
+      }
+    }
+  ]
+}
