@@ -1,4 +1,7 @@
-# Org `.github` additions
+# Staged org-level GitHub files
+
+Files staged here are public templates. An operator applies each one once
+to its destination; consumer repos never copy the checker logic.
 
 This tree stages org-level additions for the `TogetherWeOwn/.github`
 repo. Our credential scope does not cover that repo, so an Operator
@@ -6,13 +9,39 @@ applies these files there after this change merges. Nothing here is
 live by existing in this repo; each file reaches its destination only
 through the apply path in the maps below.
 
-It currently stages three independent additions:
+It currently stages these independent additions:
 
+- the **config-deploy shared checks**;
 - the **test-missing gate** (reusable workflow + wrapper + ruleset twins);
 - the **blocker-ledger classes 4-7 gates** (four reusable workflows +
   wrappers + ruleset twins; see below);
 - the **SDLC 1.0 shared CI/policy foundation stage** (baseline ruleset
   twins, exclude list, discovery, repo template, decision + runbook).
+
+## config-deploy shared checks
+
+| Staged file | Destination | Applied by |
+| --- | --- | --- |
+| `config-deploy/config-deploy.yml` | Org `.github` repository, `.github/workflows/config-deploy.yml` (reusable `workflow_call` workflow) | Operator |
+| `config-deploy/caller-workflow.yml` | Each consumer repo, `.github/workflows/config-deploy.yml` (the only per-repo file; replace both `CONFIG_DEPLOY_ORG_GITHUB_SHA` markers with the same merged `.github` commit SHA first) | Repo maintainer |
+| `config-deploy/config_deploy_check.py` | Org `.github` repository, `.github/scripts/config_deploy_check.py` (verbatim copy of the root `config_deploy_check.py` in this repo; fix upstream here, then re-copy) | Operator |
+| `config-deploy/org-ruleset.json` | Org rulesets API, applied once after every in-scope consumer reports the expected check | Operator (org admin) |
+
+The reusable workflow checks out the consumer repo for analysis and the
+`.github` repo at the caller's pinned SHA for the shared checker. It verifies
+the checker digest before execution, so a caller cannot substitute arbitrary
+code through `checker_ref`. The workflow takes no mode input and always runs
+in error mode, so a pull request cannot weaken the gate by editing the caller.
+Both workflows use GitHub-hosted runners. The caller markers are intentionally
+not a usable release pin until that central commit exists. The `.github`
+policy repo and `replay-*` mirrors are excluded from the ruleset (mirroring
+the single exclude list in `sdlc-foundation/repo-exclude-list.txt`), so no
+host-context workflow is staged. The ruleset does not enable merge queues,
+lock renames, or change unrelated branch-protection policy; the caller
+supports existing merge queues via `merge_group`.
+
+The rollout, check catalogue and fail-closed contract are documented in
+`docs/config-deploy-checks.md` in this repo.
 
 ## Blocker-ledger classes 4-7 gates
 
@@ -120,4 +149,6 @@ day-1 repo template, the central-repo decision and the operator runbook.
 ./templates/org-github/tests/test_sdlc_foundation.sh
 ./test_sdlc_foundation_placement.sh
 python3 -m unittest test_sdlc_foundation_acceptance
+python3 -m unittest test_config_deploy_check
+./test_config_deploy_placement.sh
 ```

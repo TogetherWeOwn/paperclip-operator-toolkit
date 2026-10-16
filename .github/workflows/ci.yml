@@ -1167,6 +1167,12 @@ jobs:
       - name: review_dedup placement gate
         run: ./test_review_dedup_placement.sh
 
+      - name: shared config/deploy checks suite
+        run: python3 -m unittest -v test_config_deploy_check.py
+
+      - name: config/deploy placement gate
+        run: ./test_config_deploy_placement.sh
+
       - name: pr-hygiene fault-visibility suite
         run: python3 -m unittest -v test_pr_hygiene_fault_visibility.py
 

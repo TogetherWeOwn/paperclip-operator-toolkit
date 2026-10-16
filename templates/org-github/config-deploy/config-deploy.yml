@@ -1,0 +1,43 @@
+name: config-deploy
+
+# Shared deterministic config/deploy checks — defined ONCE here.
+# Org home: TogetherWeOwn/.github. Consumers call this workflow from a thin
+# per-repo caller. The caller must pin this workflow and checker_ref to the
+# same merged .github commit; see the explicit placeholder in the caller.
+
+on:
+  workflow_call:
+    inputs:
+      checker_ref:
+        description: "Merged .github commit containing this workflow and checker"
+        type: string
+        required: true
+      # No mode input by design: the gate always runs in error mode. A
+      # pull_request run uses the caller file from the PR's own merge
+      # commit, so a caller-controlled mode would let any PR flip the
+      # required check to warn (findings printed, exit 0, still green).
+
+permissions:
+  contents: read
+
+jobs:
+  config-deploy:
+    name: config-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: TogetherWeOwn/.github
+          ref: ${{ inputs.checker_ref }}
+          path: .config-deploy
+          persist-credentials: false
+      - name: Verify shared checker content
+        working-directory: .config-deploy/.github/scripts
+        run: echo "0befb218ced129175b922f6da7afefd1ed5e3e8b3b9e53c959d98efc5d3ba018  config_deploy_check.py" | sha256sum --check --status
+      - name: Run shared config/deploy checks
+        working-directory: .config-deploy/.github/scripts
+        run: python3 config_deploy_check.py --root "${{ github.workspace }}" --mode error
