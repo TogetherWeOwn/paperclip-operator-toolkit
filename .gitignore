@@ -124,3 +124,9 @@ verification/.tog-1014-fork-parents.cache
 # release process; it is not tracked.
 plugins/model-selection/dist/
 plugins/cliproxy-insight/dist/
+
+# Escape-ledger runtime state can contain private operational details.
+ops/kpi/ESCAPES.md
+ops/kpi/.escape-cache/
+ops/kpi/escape-history/
+ops/kpi/.escape-ledger.lock

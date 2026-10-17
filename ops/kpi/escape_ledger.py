@@ -27,7 +27,7 @@ import time
 import uuid
 
 UTC = dt.timezone.utc
-VERSION = 3
+VERSION = 4
 FIX = re.compile(r"(?<![a-z])(?:hotfix|fix)(?:es|ed|ing)?(?![a-z])", re.I)
 REVERT = re.compile(r"^\s*revert\b", re.I)
 REVERT_SHA = re.compile(r"\bthis reverts commit\s+([0-9a-f]{7,40})\b", re.I)
@@ -476,12 +476,15 @@ def collect_reviews(container, runtime="docker"):
 def incident_date(line, source):
     match = re.search(r"\b(20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d))", line)
     if match:
-        return instant(match[1])
+        return instant(match[1]), True
     match = re.search(r"\b(20\d\d-\d\d-\d\d)(?:\b|(?=T))", line)
     if match:
-        return instant(match[1] + "T00:00:00Z")
+        return instant(match[1] + "T00:00:00Z"), True
     match = re.search(r"(20\d{6})", source.name)
-    return instant(dt.datetime.strptime(match[1], "%Y%m%d").strftime("%Y-%m-%dT00:00:00Z")) if match else None
+    if match:
+        value = dt.datetime.strptime(match[1], "%Y%m%d").replace(tzinfo=UTC)
+        return value, False
+    return None, False
 
 
 def incident_lines(source, errors):
@@ -490,6 +493,11 @@ def incident_lines(source, errors):
             yield from enumerate(handle, 1)
     except OSError:
         errors.append(f"incident source unreadable: {source}")
+
+
+def memory_dir_for_root(root):
+    project = str(root.expanduser().resolve()).lstrip(os.sep).replace(os.sep, "-")
+    return Path.home() / ".claude/projects" / ("-" + project) / "memory"
 
 
 def collect_incidents(paths, repositories, prs_by_repo, start, end):
@@ -505,7 +513,7 @@ def collect_incidents(paths, repositories, prs_by_repo, start, end):
             if not re.search(r"\bINCIDENT(?:S)?\b", line, re.I):
                 continue
             try:
-                occurred = incident_date(line, source)
+                occurred, inline_date = incident_date(line, source)
             except ValueError:
                 errors.append(f"incident date invalid: {source}:{lineno}")
                 continue
@@ -538,9 +546,9 @@ def collect_incidents(paths, repositories, prs_by_repo, start, end):
                     present["evidence"].append(evidence)
                 else:
                     links.append({"repo": repo, "number": number, "evidence": [evidence]})
-            # Identical date-less notes on different days are distinct occurrences;
-            # copies with the same normalized occurrence and text still deduplicate.
-            identity = f"{source.resolve()}:{lineno}"
+            # Inline-dated copies identify one occurrence across source files; filename-only
+            # dates retain source and line identity so separate notes are not collapsed.
+            identity = "" if inline_date else f"{source.resolve()}:{lineno}"
             digest = hashlib.sha256((stamp(occurred) + "\0" + identity + "\0" + line.strip()).encode()).hexdigest()
             if digest in seen:
                 continue
@@ -686,11 +694,16 @@ def run(args):
                     try:
                         if isinstance(cached, dict) and "analysis" in cached:
                             analysis = cached["analysis"]
+                            linker.unresolved_revert_commits += cached.get("unresolved_revert_commits", 0)
                         else:
                             ensure_commit(mirror, repo, (pr.get("mergeCommit") or {}).get("oid"), github)
+                            unresolved_before = linker.unresolved_revert_commits
                             analysis = linker.analyze(pr)
-                        if cached is None:
-                            save_json(cache_dir / (key + ".json"), {"analysis": analysis})
+                            unresolved = linker.unresolved_revert_commits - unresolved_before
+                            save_json(cache_dir / (key + ".json"), {
+                                "analysis": analysis,
+                                "unresolved_revert_commits": unresolved,
+                            })
                     except CollectionError as exc:
                         errors.append(f"{repo}#{pr['number']}: {exc}")
                         continue
@@ -734,13 +747,16 @@ def run(args):
         legacy_source = args.root / "ops/worker-vps/operator-actions.log"
         sources = [legacy_source] if legacy_source.is_file() else []
         incidents_complete = True
-        if args.memory_dir:
-            if args.memory_dir.is_dir():
-                sources += sorted(args.memory_dir.glob("*.md"))
+        memory_dir = getattr(args, "memory_dir", None)
+        if getattr(args, "memory_dir_from_root", False):
+            memory_dir = memory_dir_for_root(args.root)
+        if memory_dir:
+            if memory_dir.is_dir():
+                sources += sorted(memory_dir.glob("*.md"))
             else:
                 incidents_complete = False
-                errors.append(f"incident memory directory missing: {args.memory_dir}")
-        source_available = bool(sources) or bool(args.memory_dir and args.memory_dir.is_dir())
+                errors.append(f"incident memory directory missing: {memory_dir}")
+        source_available = bool(sources) or bool(memory_dir and memory_dir.is_dir())
         if not source_available:
             incidents_complete = False
             errors.append("no incident sources available")
@@ -802,7 +818,10 @@ def main(argv=None):
     parser.add_argument("--repo", action="append", help="Restrict to a full org/repo; default discovers all")
     parser.add_argument("--mirror-root", type=Path, required=True)
     parser.add_argument("--token-helper", type=Path)
-    parser.add_argument("--memory-dir", type=Path)
+    memory = parser.add_mutually_exclusive_group()
+    memory.add_argument("--memory-dir", type=Path)
+    memory.add_argument("--memory-dir-from-root", action="store_true",
+                        help="Read Claude project memory for the configured checkout")
     parser.add_argument("--review-db-container", help="Optional read-only Paperclip review provenance")
     parser.add_argument("--container-runtime", choices=["docker", "podman"], default="docker")
     parser.add_argument("--output-dir", type=Path, help="Private state directory outside the checkout")

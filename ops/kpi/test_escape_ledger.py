@@ -2,7 +2,6 @@
 """Offline linkage and failure contracts; no credentials, network, or database."""
 import argparse
 import contextlib
-import datetime as dt
 import io
 import importlib.util
 import json
@@ -205,7 +204,7 @@ class GitLinkage(unittest.TestCase):
                        check=True, capture_output=True)
         linker = ledger.Linker("Org/repo", mirror, [self.intro])
         events = linker.direct_reverts(["main", "main", "deleted-historical-base"],
-            ledger.instant("2020-01-01T00:00:00Z"), ledger.instant("2030-01-01T00:00:00Z"))
+            ledger.instant("2020-01-01T00:00:00Z"), ledger.instant("9999-12-31T23:59:59Z"))
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["introducers"][0]["number"], 1)
         self.assertEqual(events[0]["introducers"][0]["evidence"][0]["method"], "direct_git_revert")
@@ -390,6 +389,7 @@ class EndToEnd(unittest.TestCase):
             gh.return_value.merged.return_value = prs
             gh.return_value.default_branches = {"Org/repo": "main"}
             instance = linker.return_value
+            instance.unresolved_revert_commits = 0
             instance.prs = {p["number"]: p for p in prs}
             instance.resolve.side_effect = instance.prs.get
             instance.direct_reverts.return_value = []
@@ -408,6 +408,33 @@ class EndToEnd(unittest.TestCase):
                          (self.root / "ops/kpi/escapes.jsonl").read_bytes())
         self.assertEqual(len(meta["tool_sha256"]), 64)
 
+    def test_cached_analysis_preserves_unresolved_revert_count(self):
+        merge = pr()
+        first, second = unittest.mock.Mock(), unittest.mock.Mock()
+        for linker in (first, second):
+            linker.prs = {1: merge}
+            linker.unresolved_revert_commits = 0
+            linker.direct_reverts.return_value = []
+
+        def analyze(_):
+            first.unresolved_revert_commits += 1
+            return None
+
+        first.analyze.side_effect = analyze
+        with patch.object(ledger, "GitHub") as gh, patch.object(ledger, "Linker", side_effect=[first, second]), \
+                patch.object(ledger, "ensure_mirror"), patch.object(ledger, "ensure_commit"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            gh.return_value.repos.return_value = ["Org/repo"]
+            gh.return_value.merged.return_value = [merge]
+            gh.return_value.default_branches = {"Org/repo": "main"}
+            self.assertEqual(ledger.run(self.args), 0)
+            self.assertEqual(ledger.run(self.args), 0)
+
+        records = [json.loads(line) for line in (self.root / "ops/kpi/escapes.jsonl").read_text().splitlines()]
+        self.assertEqual(records[0]["coverage"][0]["unresolved_revert_commits"], 1)
+        first.analyze.assert_called_once_with(merge)
+        second.analyze.assert_not_called()
+
     def test_direct_revert_without_window_merges_resolves_older_pr(self):
         work = self.root / "work"
         work.mkdir()
@@ -415,8 +442,6 @@ class EndToEnd(unittest.TestCase):
                if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                             "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
                             "GIT_COMMON_DIR")}
-        env.update(GIT_AUTHOR_DATE="2026-08-01T10:00:00Z",
-                   GIT_COMMITTER_DATE="2026-08-01T10:00:00Z")
 
         def git(*args):
             return subprocess.run(["git", "-C", str(work), *args], env=env,
@@ -429,19 +454,25 @@ class EndToEnd(unittest.TestCase):
         git("add", ".")
         git("commit", "-m", "feat: old behavior (#1)")
         original = pr(1, at="2026-08-01T10:00:00Z", sha=git("rev-parse", "HEAD"))
-        env.update(GIT_AUTHOR_DATE="2026-10-16T10:00:00Z",
-                   GIT_COMMITTER_DATE="2026-10-16T10:00:00Z")
         git("revert", "--no-edit", "HEAD")
         reverted = git("rev-parse", "HEAD")
+        original_git = ledger.git
+
+        def fixed_log_time(mirror_path, *args, **kwargs):
+            if args and args[0] == "log":
+                return (f"{reverted}\0" "2026-10-16T10:00:00Z\0"
+                        f'Revert "feat: old behavior (#1)"\n\n'
+                        f"This reverts commit {original['mergeCommit']['oid']}.\n\0\0\n")
+            return original_git(mirror_path, *args, **kwargs)
+
         with patch.object(ledger, "GitHub") as gh, \
                 patch.object(ledger, "ensure_mirror", return_value=work / ".git") as mirror, \
+                patch.object(ledger, "git", side_effect=fixed_log_time), \
                 contextlib.redirect_stdout(io.StringIO()):
             gh.return_value.repos.return_value = ["Org/repo"]
             gh.return_value.merged.return_value = []
             gh.return_value.default_branches = {"Org/repo": "trunk"}
             gh.return_value.pull.return_value = original
-            self.args.until = ledger.stamp(dt.datetime.now(ledger.UTC) + dt.timedelta(days=1))
-            self.args.days = 366
             self.assertEqual(ledger.run(self.args), 0)
             mirror.assert_called_once()
             gh.return_value.pull.assert_called_once_with("Org/repo", 1)
@@ -472,6 +503,7 @@ class EndToEnd(unittest.TestCase):
             gh.return_value.merged.return_value = [pr()]
             gh.return_value.default_branches = {"Org/repo": "main"}
             linker.return_value.prs = {1: pr()}
+            linker.return_value.unresolved_revert_commits = 0
             linker.return_value.analyze.return_value = None
             linker.return_value.direct_reverts.return_value = []
             self.assertEqual(ledger.run(self.args), 0)
@@ -518,6 +550,7 @@ class EndToEnd(unittest.TestCase):
             gh.return_value.merged.return_value = [pr()]
             gh.return_value.default_branches = dict.fromkeys(repos, "main")
             linker.return_value.prs = {1: pr()}
+            linker.return_value.unresolved_revert_commits = 0
             linker.return_value.analyze.return_value = None
             linker.return_value.direct_reverts.return_value = []
             self.assertEqual(ledger.run(self.args), 2)
@@ -566,6 +599,7 @@ class EntryPointIsolation(unittest.TestCase):
         script_index = next(i for i, arg in enumerate(command) if arg.endswith("/escape_ledger.py"))
         self.assertIn("--container-runtime", command)
         self.assertIn("docker", command)
+        self.assertIn("--memory-dir-from-root", command)
         output_index = command.index("--output-dir") + 1
         self.assertNotIn("paperclip-enterprise-company", command[output_index])
         with tempfile.TemporaryDirectory() as temporary:
@@ -586,6 +620,32 @@ class EntryPointIsolation(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("--mirror-root", result.stdout)
                     self.assertNotIn("import-shadow-canary", result.stderr)
+
+    def test_memory_directory_is_derived_from_project_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "paperclip" / "project"
+            project = str(root.resolve()).lstrip(os.sep).replace(os.sep, "-")
+            self.assertEqual(ledger.memory_dir_for_root(root),
+                             Path.home() / ".claude/projects" / ("-" + project) / "memory")
+
+    def test_escape_ledger_runtime_state_is_git_ignored(self):
+        checkout = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copyfile(checkout / ".gitignore", root / ".gitignore")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            paths = (
+                "ops/kpi/escapes.jsonl",
+                "ops/kpi/ESCAPES.md",
+                "ops/kpi/.escape-cache/Org/repo.json",
+                "ops/kpi/escape-history/2026-10-17.jsonl",
+                "ops/kpi/.escape-ledger.lock",
+            )
+            for path in paths:
+                with self.subTest(path=path):
+                    result = subprocess.run(["git", "check-ignore", "--quiet", path],
+                                            cwd=root, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, path)
 
     def test_ci_command_ignores_ambient_and_working_directory_imports(self):
         workflow = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
@@ -663,6 +723,21 @@ class Metrics(unittest.TestCase):
                 ledger.instant("2026-10-01T00:00:00Z"), ledger.instant("2026-10-03T00:00:00Z"))
             self.assertEqual(events[0]["time_precision"], "day")
             self.assertEqual(unlinked, [])
+
+    def test_inline_dated_incident_copies_are_deduplicated_across_sources(self):
+        with tempfile.TemporaryDirectory() as root:
+            first = Path(root) / "operator-actions.log"
+            second = Path(root) / "incident-copy.md"
+            line = "2026-10-02T10:00:00Z INCIDENT Org/repo#1 repeated rollout\n"
+            first.write_text(line + line)
+            second.write_text(line)
+            events, unlinked, errors = ledger.collect_incidents([first, second], ["Org/repo"],
+                {"Org/repo": {1: pr()}}, ledger.instant("2026-10-01T00:00:00Z"),
+                ledger.instant("2026-10-03T00:00:00Z"))
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["introducers"][0]["number"], 1)
+            self.assertEqual(unlinked, [])
+            self.assertEqual(errors, [])
 
     def test_same_note_on_different_dates_is_not_deduplicated(self):
         with tempfile.TemporaryDirectory() as root:
