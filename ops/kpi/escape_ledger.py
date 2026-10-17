@@ -27,7 +27,7 @@ import time
 import uuid
 
 UTC = dt.timezone.utc
-VERSION = 1
+VERSION = 2
 FIX = re.compile(r"(?<![a-z])(?:hotfix|fix)(?:es|ed|ing)?(?![a-z])", re.I)
 REVERT = re.compile(r"^\s*revert\b", re.I)
 REVERT_SHA = re.compile(r"\bthis reverts commit\s+([0-9a-f]{7,40})\b", re.I)
@@ -315,7 +315,7 @@ class Linker:
             links = []
             for abbreviated in REVERT_SHA.findall(message):
                 full = git(self.mirror, "rev-parse", "--verify", abbreviated + "^{commit}").strip()
-                number = self.introducing_pr(full)
+                number = self.introducing_pr(full, resolve=True)
                 prior = self.resolve(number) if number else None
                 if prior and instant(prior["mergedAt"]) <= instant(occurred):
                     links.append({"repo": self.repo, "number": number,
@@ -326,12 +326,18 @@ class Linker:
                                "at": occurred, "introducers": links, "candidate_only": True})
         return events
 
-    def introducing_pr(self, sha):
+    def introducing_pr(self, sha, *, resolve=False):
         if sha in self.by_sha:
             return self.by_sha[sha]
         if sha not in self.commit_prs:
             self.commit_prs[sha] = message_pr(git(self.mirror, "show", "-s", "--format=%B", sha))
-        return self.commit_prs[sha]
+        number = self.commit_prs[sha]
+        prior = self.resolve(number) if number and resolve else self.prs.get(number)
+        # Upstream/cherry-picked subjects can reuse a local PR number. A subject is
+        # a lookup hint, never identity proof; bind it to the actual merged/head SHA.
+        if prior and sha in {(prior.get("mergeCommit") or {}).get("oid"), prior.get("headRefOid")}:
+            return number
+        return None
 
     def analyze(self, pr):
         sha = (pr.get("mergeCommit") or {}).get("oid")
@@ -342,7 +348,16 @@ class Linker:
         # Squash has one commit; merge commits can contain a git revert in the PR branch.
         messages = git(self.mirror, "log", "--format=%B%x00", f"{parents[0]}..{sha}") if parents else ""
         revert_shas = REVERT_SHA.findall(text + "\n" + messages)
-        is_revert = bool(REVERT.match(pr["title"]) or revert_shas)
+        targets = {}
+        for abbreviated in revert_shas:
+            full = git(self.mirror, "rev-parse", "--verify", abbreviated + "^{commit}").strip()
+            number = self.introducing_pr(full, resolve=True)
+            prior = self.resolve(number) if number else None
+            if prior and number != pr["number"] and instant(prior["mergedAt"]) < instant(pr["mergedAt"]):
+                targets[number] = full
+        # A feature branch can undo its own unmerged experiment before merging.
+        # Such internal git reverts are NOT escapes of an earlier merged PR.
+        is_revert = bool(REVERT.match(pr["title"]) or REVERT_SHA.search(text) or targets)
         is_fix = bool(FIX.search(pr["title"] + " " + pr["headRefName"]))
         if not (is_revert or is_fix):
             return None
@@ -352,15 +367,11 @@ class Linker:
             if previous and instant(previous["mergedAt"]) < instant(pr["mergedAt"]) and (
                     is_revert or recent_introducer(previous, pr)):
                 links[number].append({"method": "explicit_pr_reference"})
-        for abbreviated in revert_shas:
-            full = git(self.mirror, "rev-parse", "--verify", abbreviated + "^{commit}").strip()
-            number = self.introducing_pr(full)
-            prior = self.resolve(number) if number else None
-            if prior and number != pr["number"] and instant(prior["mergedAt"]) < instant(pr["mergedAt"]):
-                links[number].append({"method": "reverted_commit", "commit": full})
+        for number, full in targets.items():
+            links[number].append({"method": "reverted_commit", "commit": full})
         stats = {"modified_files": 0, "blamed_lines": 0, "unmapped_lines": 0,
                  "outside_seven_day_lines": 0, "files_without_old_text_lines": 0}
-        if is_fix and not is_revert and parents:
+        if parents and ((is_fix and not is_revert) or (is_revert and not links)):
             base = parents[0]  # API baseRefOid after merge is NOT the historical fix base.
             paths = git(self.mirror, "diff", "--no-ext-diff", "--no-renames", "--name-only",
                         "--diff-filter=MD", "-z", base, sha).split("\0")
@@ -381,16 +392,18 @@ class Linker:
                 by_origin = collections.defaultdict(list)
                 for commit, line in rows:
                     stats["blamed_lines"] += 1
-                    number = self.introducing_pr(commit)
-                    earlier = self.prs.get(number)
+                    number = self.introducing_pr(commit, resolve=is_revert)
+                    earlier = self.resolve(number) if is_revert and number else self.prs.get(number)
                     if not earlier:
                         stats["unmapped_lines"] += 1
-                    elif not recent_introducer(earlier, pr):
+                    elif instant(earlier["mergedAt"]) >= instant(pr["mergedAt"]):
+                        stats["unmapped_lines"] += 1
+                    elif not is_revert and not recent_introducer(earlier, pr):
                         stats["outside_seven_day_lines"] += 1
                     else:
                         by_origin[(number, commit)].append(line)
                 for (number, commit), lines in by_origin.items():
-                    links[number].append({"method": "first_parent_blame", "commit": commit,
+                    links[number].append({"method": "revert_first_parent_blame" if is_revert else "first_parent_blame", "commit": commit,
                                           "path": path, "base": base, "lines": lines})
         return {"kind": "revert" if is_revert else "hotfix", "links": dict(links),
                 "blame": stats, "eligible": is_revert or bool(links)}

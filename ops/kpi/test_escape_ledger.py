@@ -155,6 +155,22 @@ class GitLinkage(unittest.TestCase):
         self.assertEqual(result["kind"], "revert")
         self.assertEqual(result["links"][1][0]["method"], "reverted_commit")
 
+    def test_unmerged_feature_branch_revert_is_not_an_escape(self):
+        self.path.write_text("temporary experiment\nunchanged\n")
+        self.g("commit", "-am", "unmerged experimental change")
+        self.g("revert", "--no-edit", "HEAD")
+        self.assertIsNone(self.analyze(title="feat: ship unrelated additive feature"))
+
+    def test_title_only_revert_gets_blame_linkage_without_seven_day_limit(self):
+        self.path.unlink()
+        self.g("add", "-u")
+        self.g("commit", "-m", "revert: remove experiment (#2)")
+        result = self.analyze(title="revert: remove experiment", at="2026-10-15T00:00:00Z")
+        self.assertEqual(result["kind"], "revert")
+        self.assertEqual(set(result["links"]), {1})
+        self.assertEqual(result["links"][1][0]["method"], "revert_first_parent_blame")
+        self.assertEqual(result["blame"]["blamed_lines"], 2)
+
     def test_revert_title_not_also_hotfix(self):
         self.path.write_text("modified\nunchanged\n")
         self.g("commit", "-am", "Revert fix (#2)")
@@ -183,10 +199,18 @@ class GitLinkage(unittest.TestCase):
                        check=True, capture_output=True)
         resolver = unittest.mock.Mock(return_value=self.intro)
         linker = ledger.Linker("Org/repo", mirror, [], resolver=resolver)
-        self.assertEqual(linker.introducing_pr(self.intro_sha), 1)
+        self.assertEqual(linker.introducing_pr(self.intro_sha, resolve=True), 1)
         self.assertEqual(linker.resolve(1), self.intro)
         linker.resolve(1)
         resolver.assert_called_once_with("Org/repo", 1)
+
+    def test_cherry_picked_subject_number_without_sha_identity_is_not_linked(self):
+        mirror = self.root / "ambiguous.git"
+        subprocess.run(["git", "clone", "--mirror", str(self.work), str(mirror)],
+                       check=True, capture_output=True)
+        unrelated = pr(1, sha="b" * 40)
+        linker = ledger.Linker("Org/repo", mirror, [unrelated])
+        self.assertIsNone(linker.introducing_pr(self.intro_sha))
 
     def test_git_failure_not_reported_as_clean(self):
         self.path.write_text("modified\nunchanged\n")
