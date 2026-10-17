@@ -236,12 +236,56 @@ class ReviewProvenance(unittest.TestCase):
         self.assertIsNone(ledger.review_status(pr(), [self.row(model=None)])["claude_5_of_5"])
         self.assertFalse(ledger.review_status(pr(), [self.row(model="other-reviewer")])["claude_5_of_5"])
 
+    def test_latest_review_is_chronological_across_offsets(self):
+        older = self.row(id="older", completed_at="2026-10-01T10:00:00+02:00")
+        newer = self.row(id="newer", completed_at="2026-10-01T09:00:00Z", score="4", conclusion="failure")
+        result = ledger.review_status(pr(), [older, newer])
+        self.assertEqual(result["review_id"], "newer")
+        self.assertFalse(result["claude_5_of_5"])
+
     def test_latest_same_head_failure_supersedes_pass(self):
         records = [self.row(), self.row(id="r2", score="4", conclusion="failure", completed_at="2026-10-01T09:30:00Z")]
         self.assertFalse(ledger.review_status(pr(), records)["claude_5_of_5"])
 
 
 class Collection(unittest.TestCase):
+    def test_collector_mints_only_read_permissions(self):
+        gh = ledger.GitHub(Path("/no-token-needed"))
+        gh.env["GH_TOKEN"] = "ambient-token-must-not-be-reused"
+        with patch.object(ledger.time, "monotonic", return_value=1), \
+                patch.object(ledger, "command", return_value="synthetic-canary\n") as command:
+            environment = gh.environment()
+        command.assert_called_once_with(["/no-token-needed", "token", "--permissions",
+                                         "contents=read,pull_requests=read"], timeout=60)
+        self.assertEqual(environment["GH_TOKEN"], "synthetic-canary")
+
+    def test_absent_local_pull_in_fork_history_is_a_negative_lookup(self):
+        gh = ledger.GitHub(Path("/no-token-needed"))
+        response = {"data": {"repository": {"pullRequest": None}},
+                    "errors": [{"type": "NOT_FOUND", "path": ["repository", "pullRequest"]}]}
+        with patch.object(gh, "environment", return_value={}), \
+                patch.object(ledger, "command", return_value=json.dumps(response)) as command:
+            self.assertIsNone(gh.pull("Org/repo", 4506))
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(command.call_args.kwargs["allowed_returncodes"], (0, 1))
+
+    def test_inaccessible_repository_and_other_graphql_errors_stay_failures(self):
+        gh = ledger.GitHub(Path("/no-token-needed"))
+        responses = [
+            {"data": {"repository": None}, "errors": [{"type": "NOT_FOUND", "path": ["repository"]}]},
+            {"data": {"repository": {"pullRequest": None}},
+             "errors": [{"type": "FORBIDDEN", "path": ["repository", "pullRequest"]}]},
+            {"data": {"repository": {"pullRequest": None}}, "errors": [
+                {"type": "NOT_FOUND", "path": ["repository", "pullRequest"]},
+                {"type": "RATE_LIMITED", "path": ["repository", "pullRequest"]}]},
+        ]
+        for response in responses:
+            with self.subTest(response=response), patch.object(gh, "environment", return_value={}), \
+                    patch.object(ledger, "command", return_value=json.dumps(response)), \
+                    patch.object(ledger.time, "sleep"):
+                with self.assertRaises(ledger.CollectionError):
+                    gh.pull("Org/repo", 4506)
+
     def test_graphql_pagination_and_old_updated_stop(self):
         gh = ledger.GitHub(Path("/no-token-needed"))
         pages = [
@@ -396,7 +440,32 @@ class EndToEnd(unittest.TestCase):
         self.args.memory_dir = self.root / "missing-memory"
         self.assert_incident_partial(expected_incidents=0)
 
-    def assert_incident_partial(self, expected_incidents):
+    def test_unreadable_incident_source_publishes_partial_counts(self):
+        source = self.root / "ops/worker-vps/operator-actions.log"
+        original_open = Path.open
+
+        def failing_open(path, *args, **kwargs):
+            if path == source:
+                raise PermissionError("synthetic unreadable source")
+            return original_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", failing_open):
+            self.assert_incident_partial(expected_incidents=0, expected_error="incident source unreadable:")
+
+    def test_malformed_incident_date_preserves_later_valid_events(self):
+        source = self.root / "ops/worker-vps/operator-actions.log"
+        source.write_text("2026-10-99T10:00:00Z INCIDENT Org/repo#1 sensitive-value\n"
+                          "2026-10-02T10:00:00Z INCIDENT Org/repo#1 observed\n")
+        self.assert_incident_partial(expected_incidents=1, expected_error=f"incident date invalid: {source}:1")
+
+    def test_malformed_incident_filename_date_publishes_partial(self):
+        self.args.memory_dir = self.root / "memory"
+        self.args.memory_dir.mkdir()
+        source = self.args.memory_dir / "incident-20261099.md"
+        source.write_text("Incident Org/repo#1 sensitive-value\n")
+        self.assert_incident_partial(expected_incidents=0, expected_error=f"incident date invalid: {source}:1")
+
+    def assert_incident_partial(self, expected_incidents, expected_error=None):
         repos = ["Org/repo", "Org/other"]
         with patch.object(ledger, "GitHub") as gh, patch.object(ledger, "Linker") as linker, \
                 patch.object(ledger, "ensure_mirror"), patch.object(ledger, "ensure_commit"), \
@@ -411,6 +480,9 @@ class EndToEnd(unittest.TestCase):
         records = [json.loads(l) for l in (self.root / "ops/kpi/escapes.jsonl").read_text().splitlines()]
         meta = records[0]
         self.assertEqual(meta["status"], "partial")
+        if expected_error:
+            self.assertTrue(any(expected_error in message for message in meta["errors"]), meta["errors"])
+        self.assertNotIn("sensitive-value", json.dumps(records))
         self.assertEqual(meta["merges"], 2)
         self.assertEqual(meta["escapes"], expected_incidents)
         self.assertIsNone(meta["escapes_per_100_merges"])
@@ -513,7 +585,7 @@ class Metrics(unittest.TestCase):
             p = Path(root) / "operator-actions.log"
             p.write_text("2026-10-02T10:00:00Z INCIDENT Org/repo#1 sensitive-value\n"
                          "2026-10-02T11:00:00Z INCIDENT no link sensitive-value\n")
-            events, unlinked = ledger.collect_incidents([p], ["Org/repo"], {"Org/repo": {1: pr()}},
+            events, unlinked, errors = ledger.collect_incidents([p], ["Org/repo"], {"Org/repo": {1: pr()}},
                 ledger.instant("2026-10-01T00:00:00Z"), ledger.instant("2026-10-03T00:00:00Z"))
             self.assertEqual(len(events), 1)
             self.assertEqual(len(unlinked), 1)
@@ -527,11 +599,11 @@ class Metrics(unittest.TestCase):
             record = pr(sha="abcdef12" + "a" * 32)
             index = {"Org/repo": {1: record}}
             start, end = map(ledger.instant, ["2026-10-01T00:00:00Z", "2026-10-03T00:00:00Z"])
-            events, unlinked = ledger.collect_incidents([p], list(index), index, start, end)
+            events, unlinked, errors = ledger.collect_incidents([p], list(index), index, start, end)
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["introducers"][0]["evidence"][0]["method"], "incident_commit_reference")
             index["Org/fork"] = {1: record}
-            events, unlinked = ledger.collect_incidents([p], list(index), index, start, end)
+            events, unlinked, errors = ledger.collect_incidents([p], list(index), index, start, end)
             self.assertEqual(events, [])
             self.assertEqual(len(unlinked), 1)
 
@@ -539,16 +611,30 @@ class Metrics(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             p = Path(root) / "note-20261001.md"
             p.write_text("Incident Org/repo#1 regression\n")
-            events, unlinked = ledger.collect_incidents([p], ["Org/repo"], {"Org/repo": {1: pr()}},
+            events, unlinked, errors = ledger.collect_incidents([p], ["Org/repo"], {"Org/repo": {1: pr()}},
                 ledger.instant("2026-10-01T00:00:00Z"), ledger.instant("2026-10-03T00:00:00Z"))
             self.assertEqual(events[0]["time_precision"], "day")
             self.assertEqual(unlinked, [])
+
+    def test_same_note_on_different_dates_is_not_deduplicated(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = [Path(root) / name for name in (
+                "incident-20261002.md", "incident-20261003.md", "copy-20261003.md")]
+            for path in paths:
+                path.write_text("Incident Org/repo#1 recurring regression\n")
+            events, unlinked, errors = ledger.collect_incidents(paths, ["Org/repo"], {"Org/repo": {1: pr()}},
+                ledger.instant("2026-10-01T00:00:00Z"), ledger.instant("2026-10-04T00:00:00Z"))
+            self.assertEqual(len(events), 2)
+            self.assertEqual(len({e["id"] for e in events}), 2)
+            self.assertEqual({e["at"] for e in events}, {"2026-10-02T00:00:00Z", "2026-10-03T00:00:00Z"})
+            self.assertEqual(unlinked, [])
+            self.assertEqual(errors, [])
 
     def test_memory_note_date_and_cross_repo_exclusion(self):
         with tempfile.TemporaryDirectory() as root:
             p = Path(root) / "incident-20261002.md"
             p.write_text("Incident Org/other#1; repo unrelated\n")
-            events, unlinked = ledger.collect_incidents([p], ["Org/repo"], {"Org/repo": {1: pr()}},
+            events, unlinked, errors = ledger.collect_incidents([p], ["Org/repo"], {"Org/repo": {1: pr()}},
                 ledger.instant("2026-10-01T00:00:00Z"), ledger.instant("2026-10-03T00:00:00Z"))
             self.assertEqual(events, [])
             self.assertEqual(len(unlinked), 1)

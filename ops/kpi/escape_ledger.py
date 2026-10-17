@@ -60,14 +60,14 @@ class CollectionError(RuntimeError):
     """Safe diagnostic: never includes credentials, remote URLs or tool stderr."""
 
 
-def command(argv, *, env=None, timeout=180, stdin=None) -> str:
+def command(argv, *, env=None, timeout=180, stdin=None, allowed_returncodes=(0,)) -> str:
     try:
         result = subprocess.run(argv, input=stdin, capture_output=True, text=True,
                                 encoding="utf-8", errors="surrogateescape",
                                 env=env, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CollectionError(f"{Path(argv[0]).name}: {type(exc).__name__}") from None
-    if result.returncode:
+    if result.returncode not in allowed_returncodes:
         raise CollectionError(f"{Path(argv[0]).name}: exit {result.returncode}")
     return result.stdout
 
@@ -118,29 +118,42 @@ class GitHub:
           repository(owner:$owner,name:$name){pullRequest(number:$number){
           number title body url mergedAt updatedAt headRefName headRefOid baseRefName mergeCommit{oid}}}}"""
         data = self.api("graphql", {"query": query, "variables": {
-            "owner": owner, "name": name, "number": number}})
+            "owner": owner, "name": name, "number": number}}, missing_pull=True)
         row = data["data"]["repository"]["pullRequest"]
         return row if row and row.get("mergedAt") else None
 
     def environment(self):
-        if time.monotonic() - self.minted > 1800 or not self.env.get("GH_TOKEN"):
-            token = command([str(self.token_helper), "token"], timeout=60).strip()
+        if not self.minted or time.monotonic() - self.minted > 1800 or not self.env.get("GH_TOKEN"):
+            token = command([str(self.token_helper), "token", "--permissions",
+                             "contents=read,pull_requests=read"], timeout=60).strip()
             if not token or "\n" in token:
                 raise CollectionError("token helper returned an invalid token shape")
             self.env["GH_TOKEN"] = token
             self.minted = time.monotonic()
         return self.env
 
-    def api(self, path: str, payload=None):
+    def api(self, path: str, payload=None, *, missing_pull=False):
         argv = ["gh", "api", path]
         if payload is not None:
             argv += ["--method", "POST", "--input", "-"]
         for attempt in range(3):
             try:
                 raw = command(argv, env=self.environment(), timeout=180,
-                              stdin=json.dumps(payload) if payload is not None else None)
+                              stdin=json.dumps(payload) if payload is not None else None,
+                              allowed_returncodes=(0, 1) if missing_pull else (0,))
                 result = json.loads(raw)
                 if isinstance(result, dict) and result.get("errors"):
+                    # Fork history can name upstream PRs absent in this repository.
+                    # gh exits 1 for that valid negative lookup. Accept ONLY an
+                    # accessible repository plus an exact missing-pull error;
+                    # auth, repository and transport failures remain incomplete.
+                    node = (result.get("data") or {}).get("repository")
+                    if (missing_pull and isinstance(node, dict) and "pullRequest" in node
+                            and node["pullRequest"] is None and all(
+                                error.get("type") == "NOT_FOUND" and
+                                error.get("path") == ["repository", "pullRequest"]
+                                for error in result["errors"])):
+                        return result
                     raise CollectionError("GitHub GraphQL returned errors")
                 return result
             except (CollectionError, ValueError, RecursionError):
@@ -412,7 +425,7 @@ class Linker:
 def review_status(pr, reviews):
     same = [r for r in reviews if r.get("head_sha") == pr.get("headRefOid") and
             r.get("completed_at") and instant(r["completed_at"]) <= instant(pr["mergedAt"])]
-    latest = max(same, key=lambda r: r["completed_at"], default=None)
+    latest = max(same, key=lambda r: instant(r["completed_at"]), default=None)
     if not latest:
         return {"claude_5_of_5": None, "reason": "no_exact_head_premerge_review"}
     model = latest.get("model") or ""
@@ -455,8 +468,16 @@ def incident_date(line, source):
     return instant(dt.datetime.strptime(match[1], "%Y%m%d").strftime("%Y-%m-%dT00:00:00Z")) if match else None
 
 
+def incident_lines(source, errors):
+    try:
+        with source.open(errors="replace") as handle:
+            yield from enumerate(handle, 1)
+    except OSError:
+        errors.append(f"incident source unreadable: {source}")
+
+
 def collect_incidents(paths, repositories, prs_by_repo, start, end):
-    events, unlinked, seen = [], [], set()
+    events, unlinked, errors, seen = [], [], [], set()
     commits = collections.defaultdict(set)
     for repo, prs in prs_by_repo.items():
         for number, row in prs.items():
@@ -464,50 +485,55 @@ def collect_incidents(paths, repositories, prs_by_repo, start, end):
                 if sha and SHA.fullmatch(sha):
                     commits[sha].add((repo, number))
     for source in paths:
-        with source.open(errors="replace") as handle:
-            for lineno, line in enumerate(handle, 1):
-                if not re.search(r"\bINCIDENT(?:S)?\b", line, re.I):
-                    continue
+        for lineno, line in incident_lines(source, errors):
+            if not re.search(r"\bINCIDENT(?:S)?\b", line, re.I):
+                continue
+            try:
                 occurred = incident_date(line, source)
-                if not occurred or not start <= occurred < end:
+            except ValueError:
+                errors.append(f"incident date invalid: {source}:{lineno}")
+                continue
+            if not occurred or not start <= occurred < end:
+                continue
+            links = []
+            exact_time = bool(re.search(r"20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d", line))
+            cutoff = occurred if exact_time else min(occurred + dt.timedelta(days=1), end)
+            for repo in repositories:
+                name = repo.split("/")[1]
+                # Short #N is meaningful only with an explicit repository on this line.
+                if not re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])", line, re.I):
                     continue
-                links = []
-                exact_time = bool(re.search(r"20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d", line))
-                cutoff = occurred if exact_time else min(occurred + dt.timedelta(days=1), end)
-                for repo in repositories:
-                    name = repo.split("/")[1]
-                    # Short #N is meaningful only with an explicit repository on this line.
-                    if not re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])", line, re.I):
-                        continue
-                    for number in referenced_prs(line, repo):
-                        prior = prs_by_repo.get(repo, {}).get(number)
-                        if prior and instant(prior["mergedAt"]) <= cutoff:
-                            links.append({"repo": repo, "number": number,
-                                          "evidence": [{"method": "incident_pr_reference"}]})
-                for prefix in set(re.findall(r"(?<![\w-])([0-9a-f]{7,40})(?![\w-])", line, re.I)):
-                    targets = set().union(*(ids for sha, ids in commits.items() if sha.startswith(prefix.lower())))
-                    if len(targets) != 1:
-                        continue  # Ambiguous short hashes/fork copies are never guessed.
-                    repo, number = next(iter(targets))
-                    if instant(prs_by_repo[repo][number]["mergedAt"]) > cutoff:
-                        continue
-                    evidence = {"method": "incident_commit_reference", "commit_prefix": prefix}
-                    present = next((x for x in links if x["repo"] == repo and x["number"] == number), None)
-                    if present:
-                        present["evidence"].append(evidence)
-                    else:
-                        links.append({"repo": repo, "number": number, "evidence": [evidence]})
-                digest = hashlib.sha256(line.strip().encode()).hexdigest()
-                if digest in seen:
+                for number in referenced_prs(line, repo):
+                    prior = prs_by_repo.get(repo, {}).get(number)
+                    if prior and instant(prior["mergedAt"]) <= cutoff:
+                        links.append({"repo": repo, "number": number,
+                                      "evidence": [{"method": "incident_pr_reference"}]})
+            for prefix in set(re.findall(r"(?<![\w-])([0-9a-f]{7,40})(?![\w-])", line, re.I)):
+                targets = set().union(*(ids for sha, ids in commits.items() if sha.startswith(prefix.lower())))
+                if len(targets) != 1:
+                    continue  # Ambiguous short hashes/fork copies are never guessed.
+                repo, number = next(iter(targets))
+                if instant(prs_by_repo[repo][number]["mergedAt"]) > cutoff:
                     continue
-                seen.add(digest)
-                entry = {"id": "incident:" + digest, "kind": "incident", "at": stamp(occurred),
-                         "repo": links[0]["repo"] if len({x["repo"] for x in links}) == 1 else None,
-                         "introducers": links, "source": str(source), "source_line": lineno,
-                         "time_precision": "second" if exact_time else "day",
-                         "candidate_only": True}
-                (events if links else unlinked).append(entry)
-    return events, unlinked
+                evidence = {"method": "incident_commit_reference", "commit_prefix": prefix}
+                present = next((x for x in links if x["repo"] == repo and x["number"] == number), None)
+                if present:
+                    present["evidence"].append(evidence)
+                else:
+                    links.append({"repo": repo, "number": number, "evidence": [evidence]})
+            # Identical date-less notes on different days are distinct occurrences;
+            # copies with the same normalized occurrence and text still deduplicate.
+            digest = hashlib.sha256((stamp(occurred) + "\0" + line.strip()).encode()).hexdigest()
+            if digest in seen:
+                continue
+            seen.add(digest)
+            entry = {"id": "incident:" + digest, "kind": "incident", "at": stamp(occurred),
+                     "repo": links[0]["repo"] if len({x["repo"] for x in links}) == 1 else None,
+                     "introducers": links, "source": str(source), "source_line": lineno,
+                     "time_precision": "second" if exact_time else "day",
+                     "candidate_only": True}
+            (events if links else unlinked).append(entry)
+    return events, unlinked, errors
 
 
 def aggregate(merges, events, repos, start, end):
@@ -698,14 +724,16 @@ def run(args):
             else:
                 incidents_complete = False
                 errors.append(f"incident source missing: {source}")
+        incidents, unlinked, incident_errors = collect_incidents(present, repos, prs_by_repo, start, end)
+        errors.extend(incident_errors)
+        incidents_complete = incidents_complete and not incident_errors
         # These shared sources can contain incidents for any discovered repo.
         # Keep observed counts, but never publish a complete rate for any repo
-        # when an incident source is missing (including an absent memory dir).
+        # when an incident source is missing, unreadable, or malformed.
         for entry in coverage:
             entry["incident_status"] = "complete" if incidents_complete else "partial"
             if not incidents_complete and entry["status"] == "complete":
                 entry["status"] = "partial"
-        incidents, unlinked = collect_incidents(present, repos, prs_by_repo, start, end)
         for event in incidents:
             event["type"] = "escape"
             for intro in event["introducers"]:
