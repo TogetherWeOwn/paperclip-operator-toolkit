@@ -653,8 +653,9 @@ def run(args):
     midnight = end.replace(hour=0, minute=0, second=0, microsecond=0)
     start = midnight - dt.timedelta(days=args.days - (1 if end != midnight else 0))
     lookup_start = start - dt.timedelta(days=7)
-    state_home = (Path(os.environ["XDG_STATE_HOME"]) if os.environ.get("XDG_STATE_HOME")
-                  else Path.home() / ".local/state")
+    state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
+    if not state_home.is_absolute():
+        state_home = Path.home() / ".local/state"
     out = getattr(args, "output_dir", None) or state_home / "togetherweown/escape-ledger"
     out.mkdir(parents=True, exist_ok=True)
     with lock(out / ".escape-ledger.lock", nonblocking=True):

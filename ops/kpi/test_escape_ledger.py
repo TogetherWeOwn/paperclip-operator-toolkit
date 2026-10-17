@@ -96,7 +96,7 @@ class GitLinkage(unittest.TestCase):
         fix = pr(2, at, title, sha=sha, body=body, branch=branch)
         mirror = self.root / "mirror.git"
         subprocess.run(["git", "clone", "--mirror", str(self.work), str(mirror)],
-                       check=True, capture_output=True)
+                       check=True, env=git_environment(), capture_output=True)
         return ledger.Linker("Org/repo", mirror, [self.intro, fix]).analyze(fix)
 
     def test_blame_modification_real_git_and_space_unicode_path(self):
@@ -179,7 +179,7 @@ class GitLinkage(unittest.TestCase):
         fix = pr(2, "2026-10-02T10:00:00Z", sha=fix_sha)
         mirror = self.root / "missing-target.git"
         subprocess.run(["git", "clone", "--mirror", str(self.work), str(mirror)],
-                       check=True, capture_output=True)
+                       check=True, env=git_environment(), capture_output=True)
         linker = ledger.Linker("Org/repo", mirror, [self.intro, fix])
         analysis = linker.analyze(fix)
         self.assertIsNone(analysis)
@@ -206,7 +206,7 @@ class GitLinkage(unittest.TestCase):
         self.g("revert", "--no-edit", "HEAD")
         mirror = self.root / "direct.git"
         subprocess.run(["git", "clone", "--mirror", str(self.work), str(mirror)],
-                       check=True, capture_output=True)
+                       check=True, env=git_environment(), capture_output=True)
         linker = ledger.Linker("Org/repo", mirror, [self.intro])
         events = linker.direct_reverts(["main", "main", "deleted-historical-base"],
             ledger.instant("2020-01-01T00:00:00Z"), ledger.instant("9999-12-31T23:59:59Z"))
@@ -223,7 +223,7 @@ class GitLinkage(unittest.TestCase):
         self.g("commit", "-am", f"revert: unavailable target\n\nThis reverts commit {missing}.\n")
         mirror = self.root / "missing-direct-target.git"
         subprocess.run(["git", "clone", "--mirror", str(self.work), str(mirror)],
-                       check=True, capture_output=True)
+                       check=True, env=git_environment(), capture_output=True)
         linker = ledger.Linker("Org/repo", mirror, [self.intro])
         events = linker.direct_reverts(["main"], ledger.instant("2020-01-01T00:00:00Z"),
                                         ledger.instant("9999-12-31T23:59:59Z"))
@@ -233,7 +233,7 @@ class GitLinkage(unittest.TestCase):
     def test_old_revert_target_resolved_beyond_lookup_window(self):
         mirror = self.root / "old.git"
         subprocess.run(["git", "clone", "--mirror", str(self.work), str(mirror)],
-                       check=True, capture_output=True)
+                       check=True, env=git_environment(), capture_output=True)
         resolver = unittest.mock.Mock(return_value=self.intro)
         linker = ledger.Linker("Org/repo", mirror, [], resolver=resolver)
         self.assertEqual(linker.introducing_pr(self.intro_sha, resolve=True), 1)
@@ -244,7 +244,7 @@ class GitLinkage(unittest.TestCase):
     def test_cherry_picked_subject_number_without_sha_identity_is_not_linked(self):
         mirror = self.root / "ambiguous.git"
         subprocess.run(["git", "clone", "--mirror", str(self.work), str(mirror)],
-                       check=True, capture_output=True)
+                       check=True, env=git_environment(), capture_output=True)
         unrelated = pr(1, sha="b" * 40)
         linker = ledger.Linker("Org/repo", mirror, [unrelated])
         self.assertIsNone(linker.introducing_pr(self.intro_sha))
@@ -470,10 +470,7 @@ class EndToEnd(unittest.TestCase):
     def test_direct_revert_without_window_merges_resolves_older_pr(self):
         work = self.root / "work"
         work.mkdir()
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-                            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                            "GIT_COMMON_DIR")}
+        env = git_environment()
 
         def git(*args):
             return subprocess.run(["git", "-C", str(work), *args], env=env,
@@ -575,7 +572,7 @@ class EndToEnd(unittest.TestCase):
             home.mkdir()
             os.chdir(self.root)
             try:
-                for state_home in (None, ""):
+                for state_home in (None, "", "relative/dir", " ", "~/state"):
                     with self.subTest(xdg_state_home=state_home), patch.dict(os.environ, {}, clear=False):
                         if state_home is None:
                             os.environ.pop("XDG_STATE_HOME", None)
@@ -585,7 +582,8 @@ class EndToEnd(unittest.TestCase):
                             self.assertEqual(self.run_without_candidates(), 0)
                         output = home / ".local/state/togetherweown/escape-ledger"
                         self.assertTrue((output / "escapes.jsonl").is_file())
-                        self.assertFalse((self.root / "togetherweown").exists())
+                        cwd_output = self.root / Path(state_home or "") / "togetherweown/escape-ledger"
+                        self.assertFalse(cwd_output.exists())
             finally:
                 os.chdir(original_cwd)
 
