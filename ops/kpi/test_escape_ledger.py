@@ -78,10 +78,14 @@ class GitLinkage(unittest.TestCase):
         self.temp.cleanup()
 
     def g(self, *args):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                            "GIT_COMMON_DIR")}
+        env.update(GIT_AUTHOR_DATE="2026-10-02T10:00:00Z",
+                   GIT_COMMITTER_DATE="2026-10-02T10:00:00Z")
         return subprocess.run(["git", "-C", str(self.work), *args], check=True,
-                              env=dict(os.environ, GIT_AUTHOR_DATE="2026-10-02T10:00:00Z",
-                                       GIT_COMMITTER_DATE="2026-10-02T10:00:00Z"),
-                              capture_output=True, text=True).stdout
+                              env=env, capture_output=True, text=True).stdout
 
     def analyze(self, title="fix: regression", body="", at="2026-10-02T10:00:00Z", branch="feature"):
         sha = self.g("rev-parse", "HEAD").strip()
@@ -162,6 +166,20 @@ class GitLinkage(unittest.TestCase):
         self.g("commit", "-am", "unmerged experimental change")
         self.g("revert", "--no-edit", "HEAD")
         self.assertIsNone(self.analyze(title="feat: ship unrelated additive feature"))
+
+    def test_missing_squash_revert_target_is_unresolved_not_a_collection_failure(self):
+        missing = "f" * 40
+        self.g("commit", "--allow-empty", "-m", "feat: unrelated change (#2)",
+               "-m", f"This reverts commit {missing}.")
+        fix_sha = self.g("rev-parse", "HEAD").strip()
+        fix = pr(2, "2026-10-02T10:00:00Z", sha=fix_sha)
+        mirror = self.root / "missing-target.git"
+        subprocess.run(["git", "clone", "--mirror", str(self.work), str(mirror)],
+                       check=True, capture_output=True)
+        linker = ledger.Linker("Org/repo", mirror, [self.intro, fix])
+        analysis = linker.analyze(fix)
+        self.assertIsNone(analysis)
+        self.assertEqual(linker.unresolved_revert_commits, 1)
 
     def test_title_only_revert_gets_blame_linkage_without_seven_day_limit(self):
         self.path.unlink()
@@ -249,6 +267,11 @@ class ReviewProvenance(unittest.TestCase):
 
 
 class Collection(unittest.TestCase):
+    def test_review_collection_uses_configured_container_runtime(self):
+        with patch.object(ledger, "command", return_value="") as command:
+            ledger.collect_reviews("paperclip-db", runtime="podman")
+        self.assertEqual(command.call_args.args[0][0:3], ["podman", "exec", "paperclip-db"])
+
     def test_collector_mints_only_read_permissions(self):
         gh = ledger.GitHub(Path("/no-token-needed"))
         gh.env["GH_TOKEN"] = "ambient-token-must-not-be-reused"
@@ -279,6 +302,7 @@ class Collection(unittest.TestCase):
                 {"type": "NOT_FOUND", "path": ["repository", "pullRequest"]},
                 {"type": "RATE_LIMITED", "path": ["repository", "pullRequest"]}]},
         ]
+        responses.append({"message": "Bad credentials"})
         for response in responses:
             with self.subTest(response=response), patch.object(gh, "environment", return_value={}), \
                     patch.object(ledger, "command", return_value=json.dumps(response)), \
@@ -351,6 +375,7 @@ class EndToEnd(unittest.TestCase):
         log.write_text("")
         self.args = argparse.Namespace(root=self.root, until="2026-10-17T00:00:00Z", days=30,
             org="Org", repo=None, token_helper=None, review_db_container=None,
+            container_runtime="docker", output_dir=self.root / "ops/kpi",
             mirror_root=self.root / "mirrors", memory_dir=None)
 
     def tearDown(self):
@@ -386,7 +411,11 @@ class EndToEnd(unittest.TestCase):
     def test_direct_revert_without_window_merges_resolves_older_pr(self):
         work = self.root / "work"
         work.mkdir()
-        env = dict(os.environ, GIT_AUTHOR_DATE="2026-08-01T10:00:00Z",
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                            "GIT_COMMON_DIR")}
+        env.update(GIT_AUTHOR_DATE="2026-08-01T10:00:00Z",
                    GIT_COMMITTER_DATE="2026-08-01T10:00:00Z")
 
         def git(*args):
@@ -411,6 +440,8 @@ class EndToEnd(unittest.TestCase):
             gh.return_value.merged.return_value = []
             gh.return_value.default_branches = {"Org/repo": "trunk"}
             gh.return_value.pull.return_value = original
+            self.args.until = ledger.stamp(dt.datetime.now(ledger.UTC) + dt.timedelta(days=1))
+            self.args.days = 366
             self.assertEqual(ledger.run(self.args), 0)
             mirror.assert_called_once()
             gh.return_value.pull.assert_called_once_with("Org/repo", 1)
@@ -429,12 +460,25 @@ class EndToEnd(unittest.TestCase):
                 self.assertEqual(sum(r["reverts"] for r in rows), 1)
                 self.assertTrue(all(r["escapes_per_100_merges"] is None for r in rows))
 
-    def test_missing_incident_source_marks_all_repositories_partial(self):
+    def test_missing_optional_legacy_log_uses_configured_incident_sources(self):
         (self.root / "ops/worker-vps/operator-actions.log").unlink()
         self.args.memory_dir = self.root / "memory"
         self.args.memory_dir.mkdir()
         (self.args.memory_dir / "incident-20261002.md").write_text("Incident Org/repo#1 regression\n")
-        self.assert_incident_partial(expected_incidents=1)
+        with patch.object(ledger, "GitHub") as gh, patch.object(ledger, "Linker") as linker, \
+                patch.object(ledger, "ensure_mirror"), patch.object(ledger, "ensure_commit"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            gh.return_value.repos.return_value = ["Org/repo"]
+            gh.return_value.merged.return_value = [pr()]
+            gh.return_value.default_branches = {"Org/repo": "main"}
+            linker.return_value.prs = {1: pr()}
+            linker.return_value.analyze.return_value = None
+            linker.return_value.direct_reverts.return_value = []
+            self.assertEqual(ledger.run(self.args), 0)
+        records = [json.loads(line) for line in (self.root / "ops/kpi/escapes.jsonl").read_text().splitlines()]
+        self.assertEqual(records[0]["status"], "complete")
+        self.assertEqual(records[0]["escapes"], 1)
+        self.assertTrue((self.root / "ops/kpi/escape-history/2026-10-17.jsonl").exists())
 
     def test_missing_configured_memory_directory_is_partial(self):
         self.args.memory_dir = self.root / "missing-memory"
@@ -520,6 +564,10 @@ class EntryPointIsolation(unittest.TestCase):
         command = shlex.split(next(l.removeprefix("ExecStart=") for l in unit.splitlines()
                                    if l.startswith("ExecStart=")))
         script_index = next(i for i, arg in enumerate(command) if arg.endswith("/escape_ledger.py"))
+        self.assertIn("--container-runtime", command)
+        self.assertIn("docker", command)
+        output_index = command.index("--output-dir") + 1
+        self.assertNotIn("paperclip-enterprise-company", command[output_index])
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             script_dir, ambient, cwd = (root / name for name in ("script", "ambient", "cwd"))
@@ -624,9 +672,21 @@ class Metrics(unittest.TestCase):
                 path.write_text("Incident Org/repo#1 recurring regression\n")
             events, unlinked, errors = ledger.collect_incidents(paths, ["Org/repo"], {"Org/repo": {1: pr()}},
                 ledger.instant("2026-10-01T00:00:00Z"), ledger.instant("2026-10-04T00:00:00Z"))
-            self.assertEqual(len(events), 2)
-            self.assertEqual(len({e["id"] for e in events}), 2)
+            self.assertEqual(len(events), 3)
+            self.assertEqual(len({e["id"] for e in events}), 3)
             self.assertEqual({e["at"] for e in events}, {"2026-10-02T00:00:00Z", "2026-10-03T00:00:00Z"})
+            self.assertEqual(unlinked, [])
+            self.assertEqual(errors, [])
+
+    def test_timezone_free_timestamp_uses_day_precision_for_link_cutoff(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "incident.md"
+            path.write_text("2026-10-01T10:00:00 INCIDENT Org/repo#1 regression\n")
+            events, unlinked, errors = ledger.collect_incidents([path], ["Org/repo"],
+                {"Org/repo": {1: pr(at="2026-10-01T10:00:00Z")}},
+                ledger.instant("2026-10-01T00:00:00Z"), ledger.instant("2026-10-02T00:00:00Z"))
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["time_precision"], "day")
             self.assertEqual(unlinked, [])
             self.assertEqual(errors, [])
 

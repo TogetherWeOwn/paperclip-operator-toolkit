@@ -27,7 +27,7 @@ import time
 import uuid
 
 UTC = dt.timezone.utc
-VERSION = 2
+VERSION = 3
 FIX = re.compile(r"(?<![a-z])(?:hotfix|fix)(?:es|ed|ing)?(?![a-z])", re.I)
 REVERT = re.compile(r"^\s*revert\b", re.I)
 REVERT_SHA = re.compile(r"\bthis reverts commit\s+([0-9a-f]{7,40})\b", re.I)
@@ -61,10 +61,11 @@ class CollectionError(RuntimeError):
 
 
 def command(argv, *, env=None, timeout=180, stdin=None, allowed_returncodes=(0,)) -> str:
+    # Callers pass fixed executables and argument arrays; never interpolate a shell command.
     try:
         result = subprocess.run(argv, input=stdin, capture_output=True, text=True,
                                 encoding="utf-8", errors="surrogateescape",
-                                env=env, timeout=timeout, check=False)
+                                env=env, timeout=timeout, check=False, shell=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CollectionError(f"{Path(argv[0]).name}: {type(exc).__name__}") from None
     if result.returncode not in allowed_returncodes:
@@ -142,6 +143,8 @@ class GitHub:
                               stdin=json.dumps(payload) if payload is not None else None,
                               allowed_returncodes=(0, 1) if missing_pull else (0,))
                 result = json.loads(raw)
+                if missing_pull and not (isinstance(result, dict) and isinstance(result.get("data"), dict)):
+                    raise CollectionError("GitHub GraphQL returned no data envelope")
                 if isinstance(result, dict) and result.get("errors"):
                     # Fork history can name upstream PRs absent in this repository.
                     # gh exits 1 for that valid negative lookup. Accept ONLY an
@@ -202,9 +205,9 @@ class GitHub:
             cursor = next_cursor
 
 
-def git(mirror: Path, *args, env=None) -> str:
+def git(mirror: Path, *args, env=None, allowed_returncodes=(0,)) -> str:
     return command(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.quotePath=false",
-                    "--git-dir", str(mirror), *args], env=env)
+                    "--git-dir", str(mirror), *args], env=env, allowed_returncodes=allowed_returncodes)
 
 
 def ensure_mirror(root: Path, repo: str, github: GitHub) -> Path:
@@ -295,6 +298,7 @@ class Linker:
         self.by_sha = {(p.get("mergeCommit") or {}).get("oid"): p["number"] for p in prs}
         self.commit_prs = {}
         self.resolved = set()
+        self.unresolved_revert_commits = 0
 
     def resolve(self, number):
         if number not in self.prs and number not in self.resolved and self.resolver:
@@ -304,6 +308,14 @@ class Linker:
                 self.by_sha[(row.get("mergeCommit") or {}).get("oid")] = number
             self.resolved.add(number)
         return self.prs.get(number)
+
+    def revert_target(self, abbreviated):
+        target = git(self.mirror, "rev-parse", "--verify", "--quiet",
+                     abbreviated + "^{commit}", allowed_returncodes=(0, 1)).strip()
+        if not target:
+            self.unresolved_revert_commits += 1
+            return None
+        return target
 
     def direct_reverts(self, branches, start, end):
         existing = set(git(self.mirror, "for-each-ref", "--format=%(refname)", "refs/heads").splitlines())
@@ -327,7 +339,9 @@ class Linker:
             seen.add(sha)
             links = []
             for abbreviated in REVERT_SHA.findall(message):
-                full = git(self.mirror, "rev-parse", "--verify", abbreviated + "^{commit}").strip()
+                full = self.revert_target(abbreviated)
+                if not full:
+                    continue
                 number = self.introducing_pr(full, resolve=True)
                 prior = self.resolve(number) if number else None
                 if prior and instant(prior["mergedAt"]) <= instant(occurred):
@@ -363,7 +377,9 @@ class Linker:
         revert_shas = REVERT_SHA.findall(text + "\n" + messages)
         targets = {}
         for abbreviated in revert_shas:
-            full = git(self.mirror, "rev-parse", "--verify", abbreviated + "^{commit}").strip()
+            full = self.revert_target(abbreviated)
+            if not full:
+                continue
             number = self.introducing_pr(full, resolve=True)
             prior = self.resolve(number) if number else None
             if prior and number != pr["number"] and instant(prior["mergedAt"]) < instant(pr["mergedAt"]):
@@ -437,7 +453,7 @@ def review_status(pr, reviews):
             "reason": "exact_head_premerge" if model else "review_model_unknown"}
 
 
-def collect_reviews(container):
+def collect_reviews(container, runtime="docker"):
     if not container:
         return {}, "not_configured"
     # Do not export prompts, secrets, entire run snapshots or mutable agent defaults.
@@ -448,7 +464,7 @@ def collect_reviews(container):
       FROM chat_github_reviews r LEFT JOIN heartbeat_runs h ON h.id=r.run_id
       WHERE r.assessment IS NOT NULL AND r.conclusion IS NOT NULL
     ) t"""
-    raw = command(["docker", "exec", container, "psql", "-U", "paperclip", "-d", "paperclip",
+    raw = command([runtime, "exec", container, "psql", "-U", "paperclip", "-d", "paperclip",
                    "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query], timeout=120)
     index = collections.defaultdict(list)
     for line in raw.splitlines():
@@ -461,7 +477,7 @@ def incident_date(line, source):
     match = re.search(r"\b(20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d))", line)
     if match:
         return instant(match[1])
-    match = re.search(r"\b(20\d\d-\d\d-\d\d)\b", line)
+    match = re.search(r"\b(20\d\d-\d\d-\d\d)(?:\b|(?=T))", line)
     if match:
         return instant(match[1] + "T00:00:00Z")
     match = re.search(r"(20\d{6})", source.name)
@@ -496,7 +512,8 @@ def collect_incidents(paths, repositories, prs_by_repo, start, end):
             if not occurred or not start <= occurred < end:
                 continue
             links = []
-            exact_time = bool(re.search(r"20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d", line))
+            exact_time = bool(re.search(
+                r"\b20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)", line))
             cutoff = occurred if exact_time else min(occurred + dt.timedelta(days=1), end)
             for repo in repositories:
                 name = repo.split("/")[1]
@@ -523,7 +540,8 @@ def collect_incidents(paths, repositories, prs_by_repo, start, end):
                     links.append({"repo": repo, "number": number, "evidence": [evidence]})
             # Identical date-less notes on different days are distinct occurrences;
             # copies with the same normalized occurrence and text still deduplicate.
-            digest = hashlib.sha256((stamp(occurred) + "\0" + line.strip()).encode()).hexdigest()
+            identity = f"{source.resolve()}:{lineno}"
+            digest = hashlib.sha256((stamp(occurred) + "\0" + identity + "\0" + line.strip()).encode()).hexdigest()
             if digest in seen:
                 continue
             seen.add(digest)
@@ -627,7 +645,8 @@ def run(args):
     midnight = end.replace(hour=0, minute=0, second=0, microsecond=0)
     start = midnight - dt.timedelta(days=args.days - (1 if end != midnight else 0))
     lookup_start = start - dt.timedelta(days=7)
-    out = args.root / "ops/kpi"
+    out = getattr(args, "output_dir", None) or Path(
+        os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "togetherweown/escape-ledger"
     out.mkdir(parents=True, exist_ok=True)
     with lock(out / ".escape-ledger.lock", nonblocking=True):
         github = GitHub(args.token_helper or args.root / "gh_token.sh")
@@ -636,7 +655,8 @@ def run(args):
             raise CollectionError("empty or invalid repository discovery")
         errors, coverage, merges, events, prs_by_repo = [], [], [], [], {}
         try:
-            reviews, review_source = collect_reviews(args.review_db_container)
+            reviews, review_source = collect_reviews(
+                args.review_db_container, getattr(args, "container_runtime", "docker"))
         except (CollectionError, ValueError, KeyError):
             reviews, review_source = {}, "unavailable"
             errors.append("review source unavailable; review provenance is unknown")
@@ -699,8 +719,10 @@ def run(args):
                         intro["review"] = review_status(prior, reviews.get((repo.lower(), intro["number"]), []))
                     events.append(direct)
                 prs_by_repo[repo] = linker.prs
+                unresolved_reverts = linker.unresolved_revert_commits
                 coverage.append({"repo": repo, "merges": len(window), "analyzed": analyzed,
                                  "fix_or_revert_candidates": candidates, "unlinked_fixes": unlinked_fixes,
+                                 "unresolved_revert_commits": unresolved_reverts if isinstance(unresolved_reverts, int) else 0,
                                  "status": "complete" if analyzed == len(window) else "partial"})
                 emit("repo_completed", repo=repo, merges=len(window), analyzed=analyzed,
                      seconds=round(time.monotonic() - began, 2))
@@ -709,7 +731,8 @@ def run(args):
                 coverage.append({"repo": repo, "status": "unavailable"})
                 emit("repo_failed", repo=repo, error=type(exc).__name__,
                      detail=str(exc) if isinstance(exc, CollectionError) else "invalid response shape")
-        sources = [args.root / "ops/worker-vps/operator-actions.log"]
+        legacy_source = args.root / "ops/worker-vps/operator-actions.log"
+        sources = [legacy_source] if legacy_source.is_file() else []
         incidents_complete = True
         if args.memory_dir:
             if args.memory_dir.is_dir():
@@ -717,13 +740,11 @@ def run(args):
             else:
                 incidents_complete = False
                 errors.append(f"incident memory directory missing: {args.memory_dir}")
-        present = []
-        for source in sources:
-            if source.is_file():
-                present.append(source)
-            else:
-                incidents_complete = False
-                errors.append(f"incident source missing: {source}")
+        source_available = bool(sources) or bool(args.memory_dir and args.memory_dir.is_dir())
+        if not source_available:
+            incidents_complete = False
+            errors.append("no incident sources available")
+        present = [source for source in sources if source.is_file()]
         incidents, unlinked, incident_errors = collect_incidents(present, repos, prs_by_repo, start, end)
         errors.extend(incident_errors)
         incidents_complete = incidents_complete and not incident_errors
@@ -783,6 +804,8 @@ def main(argv=None):
     parser.add_argument("--token-helper", type=Path)
     parser.add_argument("--memory-dir", type=Path)
     parser.add_argument("--review-db-container", help="Optional read-only Paperclip review provenance")
+    parser.add_argument("--container-runtime", choices=["docker", "podman"], default="docker")
+    parser.add_argument("--output-dir", type=Path, help="Private state directory outside the checkout")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--until", help="Exclusive UTC timestamp (default host clock now)")
     parser.add_argument("--entry-point", choices=["cli", "systemd"], default="cli")
