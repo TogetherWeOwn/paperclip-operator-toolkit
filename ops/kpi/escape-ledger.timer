@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily shadow escape baseline at 05:23 UTC
+
+[Timer]
+OnCalendar=*-*-* 05:23:00 UTC
+AccuracySec=1s
+Persistent=true
+Unit=escape-ledger.service
+
+[Install]
+WantedBy=timers.target
