@@ -1124,6 +1124,10 @@ jobs:
       - name: admitted-PR closeout ledger suite
         run: python3 -m unittest -v test_pr_closeout_ledger.py
 
+      # Offline-only shadow metric tests; no GitHub or production collection in CI.
+      - name: escape ledger linkage suite
+        run: python3 -m unittest discover -s ops/kpi -p 'test_escape_ledger.py' -v
+
       # Blocker-ledger classes 4-7: deterministic pre-review gates
       # (migration, API contract, concurrency, lockfile). Logic is stdlib;
       # acceptance parses delivered workflows with the pinned PyYAML above.
