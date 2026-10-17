@@ -627,9 +627,9 @@ def run(args):
                                    "mergedAt": pr["mergedAt"], "head": pr["headRefOid"],
                                    "merge_commit": (pr.get("mergeCommit") or {}).get("oid"),
                                    "review": review_status(pr, reviews.get((repo.lower(), pr["number"]), []))})
-                if not window:
-                    coverage.append({"repo": repo, "merges": 0, "status": "complete", "analyzed": 0})
-                    continue
+                # Direct pushes can revert an older PR even with no window merges.
+                # Always scan the discovered default branch, using the resolver for
+                # introducing PRs outside the seven-day lookback.
                 mirror = ensure_mirror(args.mirror_root, repo, github)
                 linker = Linker(repo, mirror, prs, resolver=github.pull)
                 analyzed, candidates, unlinked_fixes = 0, 0, 0
@@ -684,14 +684,27 @@ def run(args):
                 emit("repo_failed", repo=repo, error=type(exc).__name__,
                      detail=str(exc) if isinstance(exc, CollectionError) else "invalid response shape")
         sources = [args.root / "ops/worker-vps/operator-actions.log"]
+        incidents_complete = True
         if args.memory_dir:
-            sources += sorted(args.memory_dir.glob("*.md"))
+            if args.memory_dir.is_dir():
+                sources += sorted(args.memory_dir.glob("*.md"))
+            else:
+                incidents_complete = False
+                errors.append(f"incident memory directory missing: {args.memory_dir}")
         present = []
         for source in sources:
             if source.is_file():
                 present.append(source)
             else:
+                incidents_complete = False
                 errors.append(f"incident source missing: {source}")
+        # These shared sources can contain incidents for any discovered repo.
+        # Keep observed counts, but never publish a complete rate for any repo
+        # when an incident source is missing (including an absent memory dir).
+        for entry in coverage:
+            entry["incident_status"] = "complete" if incidents_complete else "partial"
+            if not incidents_complete and entry["status"] == "complete":
+                entry["status"] = "partial"
         incidents, unlinked = collect_incidents(present, repos, prs_by_repo, start, end)
         for event in incidents:
             event["type"] = "escape"

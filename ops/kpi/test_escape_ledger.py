@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shlex
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -337,6 +339,96 @@ class EndToEnd(unittest.TestCase):
                          (self.root / "ops/kpi/escapes.jsonl").read_bytes())
         self.assertEqual(len(meta["tool_sha256"]), 64)
 
+    def test_direct_revert_without_window_merges_resolves_older_pr(self):
+        work = self.root / "work"
+        work.mkdir()
+        env = dict(os.environ, GIT_AUTHOR_DATE="2026-08-01T10:00:00Z",
+                   GIT_COMMITTER_DATE="2026-08-01T10:00:00Z")
+
+        def git(*args):
+            return subprocess.run(["git", "-C", str(work), *args], env=env,
+                                  check=True, capture_output=True, text=True).stdout.strip()
+
+        git("init", "-b", "trunk")
+        git("config", "user.email", "test@example.invalid")
+        git("config", "user.name", "Fixture")
+        (work / "behavior.txt").write_text("older merged behavior\n")
+        git("add", ".")
+        git("commit", "-m", "feat: old behavior (#1)")
+        original = pr(1, at="2026-08-01T10:00:00Z", sha=git("rev-parse", "HEAD"))
+        env.update(GIT_AUTHOR_DATE="2026-10-16T10:00:00Z",
+                   GIT_COMMITTER_DATE="2026-10-16T10:00:00Z")
+        git("revert", "--no-edit", "HEAD")
+        reverted = git("rev-parse", "HEAD")
+        with patch.object(ledger, "GitHub") as gh, \
+                patch.object(ledger, "ensure_mirror", return_value=work / ".git") as mirror, \
+                contextlib.redirect_stdout(io.StringIO()):
+            gh.return_value.repos.return_value = ["Org/repo"]
+            gh.return_value.merged.return_value = []
+            gh.return_value.default_branches = {"Org/repo": "trunk"}
+            gh.return_value.pull.return_value = original
+            self.assertEqual(ledger.run(self.args), 0)
+            mirror.assert_called_once()
+            gh.return_value.pull.assert_called_once_with("Org/repo", 1)
+        records = [json.loads(l) for l in (self.root / "ops/kpi/escapes.jsonl").read_text().splitlines()]
+        self.assertEqual(records[0]["merges"], 0)
+        self.assertEqual(records[0]["escapes"], 1)
+        self.assertEqual(records[0]["coverage"][0]["status"], "complete")
+        event = next(r for r in records if r["type"] == "escape")
+        self.assertEqual(event["commit"], reverted)
+        self.assertEqual(event["introducers"][0]["number"], 1)
+        self.assertEqual(event["introducers"][0]["evidence"], [
+            {"method": "direct_git_revert", "commit": original["mergeCommit"]["oid"]}])
+        for repo in ("Org/repo", "ALL"):
+            for period in ("day", "week"):
+                rows = [r for r in records if r.get("period") == period and r["repo"] == repo]
+                self.assertEqual(sum(r["reverts"] for r in rows), 1)
+                self.assertTrue(all(r["escapes_per_100_merges"] is None for r in rows))
+
+    def test_missing_incident_source_marks_all_repositories_partial(self):
+        (self.root / "ops/worker-vps/operator-actions.log").unlink()
+        self.args.memory_dir = self.root / "memory"
+        self.args.memory_dir.mkdir()
+        (self.args.memory_dir / "incident-20261002.md").write_text("Incident Org/repo#1 regression\n")
+        self.assert_incident_partial(expected_incidents=1)
+
+    def test_missing_configured_memory_directory_is_partial(self):
+        self.args.memory_dir = self.root / "missing-memory"
+        self.assert_incident_partial(expected_incidents=0)
+
+    def assert_incident_partial(self, expected_incidents):
+        repos = ["Org/repo", "Org/other"]
+        with patch.object(ledger, "GitHub") as gh, patch.object(ledger, "Linker") as linker, \
+                patch.object(ledger, "ensure_mirror"), patch.object(ledger, "ensure_commit"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            gh.return_value.repos.return_value = repos
+            gh.return_value.merged.return_value = [pr()]
+            gh.return_value.default_branches = dict.fromkeys(repos, "main")
+            linker.return_value.prs = {1: pr()}
+            linker.return_value.analyze.return_value = None
+            linker.return_value.direct_reverts.return_value = []
+            self.assertEqual(ledger.run(self.args), 2)
+        records = [json.loads(l) for l in (self.root / "ops/kpi/escapes.jsonl").read_text().splitlines()]
+        meta = records[0]
+        self.assertEqual(meta["status"], "partial")
+        self.assertEqual(meta["merges"], 2)
+        self.assertEqual(meta["escapes"], expected_incidents)
+        self.assertIsNone(meta["escapes_per_100_merges"])
+        self.assertTrue(all(r["status"] == "partial" for r in meta["coverage"]))
+        rows = [r for r in records if r["type"] == "aggregate"]
+        self.assertEqual({r["period"] for r in rows}, {"day", "week"})
+        self.assertTrue(all(r["coverage_status"] == "partial" for r in rows))
+        self.assertTrue(all(r["escapes_per_100_merges"] is None for r in rows))
+        for period in ("day", "week"):
+            org_rows = [r for r in rows if r["period"] == period and r["repo"] == "ALL"]
+            self.assertEqual(sum(r["merges"] for r in org_rows), 2)
+            self.assertEqual(sum(r["incidents"] for r in org_rows), expected_incidents)
+        markdown = (self.root / "ops/kpi/ESCAPES.md").read_text()
+        for repo in [*repos, "ALL"]:
+            row = next(l for l in markdown.splitlines() if l.startswith(f"| {repo} (PARTIAL;"))
+            self.assertTrue(row.endswith("| N/A |"), row)
+        self.assertFalse((self.root / "ops/kpi/escape-history/2026-10-17.jsonl").exists())
+
     def test_collection_failure_emits_partial_not_zero_percent(self):
         with patch.object(ledger, "GitHub") as gh, contextlib.redirect_stdout(io.StringIO()):
             gh.return_value.repos.return_value = ["Org/repo"]
@@ -348,6 +440,59 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(all(r["escapes_per_100_merges"] is None for r in records if r["type"] == "aggregate"))
         self.assertIn("PARTIAL; observed counts only", (self.root / "ops/kpi/ESCAPES.md").read_text())
         self.assertFalse((self.root / "ops/kpi/escape-history/2026-10-17.jsonl").exists())
+
+
+class EntryPointIsolation(unittest.TestCase):
+    def test_service_ignores_ambient_and_script_directory_imports(self):
+        unit = Path(__file__).with_name("escape-ledger.service").read_text()
+        command = shlex.split(next(l.removeprefix("ExecStart=") for l in unit.splitlines()
+                                   if l.startswith("ExecStart=")))
+        script_index = next(i for i, arg in enumerate(command) if arg.endswith("/escape_ledger.py"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script_dir, ambient, cwd = (root / name for name in ("script", "ambient", "cwd"))
+            for directory in (script_dir, ambient, cwd):
+                directory.mkdir()
+            script = script_dir / "escape_ledger.py"
+            shutil.copyfile(Path(__file__).with_name("escape_ledger.py"), script)
+            for directory in (script_dir, ambient, cwd):
+                with self.subTest(shadow_directory=directory.name):
+                    canary = directory / "json.py"
+                    canary.write_text("raise RuntimeError('import-shadow-canary')\n")
+                    result = subprocess.run([*command[:script_index], str(script), "--help"],
+                        cwd=cwd, env=dict(os.environ, PYTHONPATH=str(ambient)),
+                        capture_output=True, text=True, timeout=30)
+                    canary.unlink()
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("--mirror-root", result.stdout)
+                    self.assertNotIn("import-shadow-canary", result.stderr)
+
+    def test_ci_command_ignores_ambient_and_working_directory_imports(self):
+        workflow = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
+        lines = workflow.read_text().splitlines()
+        index = lines.index("      - name: escape ledger linkage suite")
+        command = shlex.split(lines[index + 1].strip().removeprefix("run: "))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite_dir = root / "ops/kpi"
+            suite_dir.mkdir(parents=True)
+            # Run the delivered CI invocation against a tiny suite, not recursively
+            # against this suite. unittest discovery intentionally adds ops/kpi.
+            (suite_dir / "test_escape_ledger.py").write_text(
+                "import json, unittest\nclass Startup(unittest.TestCase):\n"
+                "    def test_stdlib(self):\n        self.assertEqual(json.loads('1'), 1)\n")
+            ambient = root / "ambient"
+            ambient.mkdir()
+            for directory in (ambient, root):
+                with self.subTest(shadow_directory=directory.name):
+                    canary = directory / "json.py"
+                    canary.write_text("raise RuntimeError('import-shadow-canary')\n")
+                    result = subprocess.run(command, cwd=root,
+                        env=dict(os.environ, PYTHONPATH=str(ambient)),
+                        capture_output=True, text=True, timeout=30)
+                    canary.unlink()
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("Ran 1 test", result.stderr)
 
 
 class Metrics(unittest.TestCase):
