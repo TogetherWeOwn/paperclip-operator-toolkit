@@ -25,6 +25,15 @@ def pr(number=1, at="2026-10-01T10:00:00Z", title="feat: add behavior", sha=None
             "mergeCommit": {"oid": sha or "a" * 40}, "baseRefName": "main"}
 
 
+def git_environment(**overrides):
+    location_variables = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                          "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                          "GIT_COMMON_DIR")
+    env = {key: value for key, value in os.environ.items() if key not in location_variables}
+    env.update(overrides)
+    return env
+
+
 class Parsing(unittest.TestCase):
     def test_hunk_old_coordinates_and_additions(self):
         self.assertEqual(ledger.old_ranges("@@ -1 +1 @@\n-a\n+b\n@@ -4,0 +5,2 @@\n+x\n+y\n@@ -8,3 +10,0 @@\n"), [(1, 1), (8, 3)])
@@ -77,14 +86,10 @@ class GitLinkage(unittest.TestCase):
         self.temp.cleanup()
 
     def g(self, *args):
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-                            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                            "GIT_COMMON_DIR")}
-        env.update(GIT_AUTHOR_DATE="2026-10-02T10:00:00Z",
-                   GIT_COMMITTER_DATE="2026-10-02T10:00:00Z")
         return subprocess.run(["git", "-C", str(self.work), *args], check=True,
-                              env=env, capture_output=True, text=True).stdout
+                              env=git_environment(GIT_AUTHOR_DATE="2026-10-02T10:00:00Z",
+                                                  GIT_COMMITTER_DATE="2026-10-02T10:00:00Z"),
+                              capture_output=True, text=True).stdout
 
     def analyze(self, title="fix: regression", body="", at="2026-10-02T10:00:00Z", branch="feature"):
         sha = self.g("rev-parse", "HEAD").strip()
@@ -211,6 +216,19 @@ class GitLinkage(unittest.TestCase):
         linker.by_sha[self.g("rev-parse", "HEAD").strip()] = 2
         self.assertEqual(linker.direct_reverts(["main"],
             ledger.instant("2020-01-01T00:00:00Z"), ledger.instant("2030-01-01T00:00:00Z")), [])
+
+    def test_direct_revert_with_missing_target_is_counted_as_unresolved(self):
+        missing = "d" * 40
+        self.path.write_text("restored behavior\n")
+        self.g("commit", "-am", f"revert: unavailable target\n\nThis reverts commit {missing}.\n")
+        mirror = self.root / "missing-direct-target.git"
+        subprocess.run(["git", "clone", "--mirror", str(self.work), str(mirror)],
+                       check=True, capture_output=True)
+        linker = ledger.Linker("Org/repo", mirror, [self.intro])
+        events = linker.direct_reverts(["main"], ledger.instant("2020-01-01T00:00:00Z"),
+                                        ledger.instant("9999-12-31T23:59:59Z"))
+        self.assertEqual(events, [])
+        self.assertEqual(linker.unresolved_revert_commits, 1)
 
     def test_old_revert_target_resolved_beyond_lookup_window(self):
         mirror = self.root / "old.git"
@@ -380,6 +398,20 @@ class EndToEnd(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def run_without_candidates(self):
+        merge = pr()
+        with patch.object(ledger, "GitHub") as gh, patch.object(ledger, "Linker") as linker, \
+                patch.object(ledger, "ensure_mirror"), patch.object(ledger, "ensure_commit"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            gh.return_value.repos.return_value = ["Org/repo"]
+            gh.return_value.merged.return_value = [merge]
+            gh.return_value.default_branches = {"Org/repo": "main"}
+            linker.return_value.prs = {merge["number"]: merge}
+            linker.return_value.unresolved_revert_commits = 0
+            linker.return_value.analyze.return_value = None
+            linker.return_value.direct_reverts.return_value = []
+            return ledger.run(self.args)
+
     def test_successful_collection_publishes_parseable_snapshot_and_exact_window(self):
         prs = [pr(), pr(2, at="2026-10-02T10:00:00Z", title="fix: regression")]
         with patch.object(ledger, "GitHub") as gh, patch.object(ledger, "Linker") as linker, \
@@ -512,6 +544,51 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(records[0]["escapes"], 1)
         self.assertTrue((self.root / "ops/kpi/escape-history/2026-10-17.jsonl").exists())
 
+    def test_run_uses_memory_directory_derived_from_checkout(self):
+        checkout = self.root / "my_repo.v1"
+        legacy = checkout / "ops/worker-vps/operator-actions.log"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("")
+        self.args.root = checkout
+        self.args.memory_dir = None
+        self.args.memory_dir_from_root = True
+        with tempfile.TemporaryDirectory() as home:
+            project = (str(checkout.resolve()).lstrip(os.sep).replace(os.sep, "-")
+                       .replace("_", "-").replace(".", "-"))
+            memory = Path(home) / ".claude/projects" / ("-" + project) / "memory"
+            memory.mkdir(parents=True)
+            note = memory / "incident-20261002.md"
+            note.write_text("Incident Org/repo#1 regression\n")
+            with patch.object(Path, "home", return_value=Path(home)):
+                self.assertEqual(self.run_without_candidates(), 0)
+        records = [json.loads(line) for line in (self.root / "ops/kpi/escapes.jsonl").read_text().splitlines()]
+        incidents = [row for row in records if row.get("type") == "escape" and row.get("kind") == "incident"]
+        self.assertEqual(records[0]["status"], "complete")
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["source"], str(note))
+
+    def test_empty_xdg_state_home_uses_absolute_home_state_dir(self):
+        self.args.output_dir = None
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as sandbox:
+            home = Path(sandbox) / "home"
+            home.mkdir()
+            os.chdir(self.root)
+            try:
+                for state_home in (None, ""):
+                    with self.subTest(xdg_state_home=state_home), patch.dict(os.environ, {}, clear=False):
+                        if state_home is None:
+                            os.environ.pop("XDG_STATE_HOME", None)
+                        else:
+                            os.environ["XDG_STATE_HOME"] = state_home
+                        with patch.object(Path, "home", return_value=home):
+                            self.assertEqual(self.run_without_candidates(), 0)
+                        output = home / ".local/state/togetherweown/escape-ledger"
+                        self.assertTrue((output / "escapes.jsonl").is_file())
+                        self.assertFalse((self.root / "togetherweown").exists())
+            finally:
+                os.chdir(original_cwd)
+
     def test_missing_configured_memory_directory_is_partial(self):
         self.args.memory_dir = self.root / "missing-memory"
         self.assert_incident_partial(expected_incidents=0)
@@ -623,8 +700,9 @@ class EntryPointIsolation(unittest.TestCase):
 
     def test_memory_directory_is_derived_from_project_root(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / "paperclip" / "project"
-            project = str(root.resolve()).lstrip(os.sep).replace(os.sep, "-")
+            root = Path(temporary) / "paperclip" / "my_repo.v1"
+            project = (str(root.resolve()).lstrip(os.sep).replace(os.sep, "-")
+                       .replace("_", "-").replace(".", "-"))
             self.assertEqual(ledger.memory_dir_for_root(root),
                              Path.home() / ".claude/projects" / ("-" + project) / "memory")
 
@@ -633,7 +711,7 @@ class EntryPointIsolation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             shutil.copyfile(checkout / ".gitignore", root / ".gitignore")
-            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "init", "-q"], cwd=root, env=git_environment(), check=True)
             paths = (
                 "ops/kpi/escapes.jsonl",
                 "ops/kpi/ESCAPES.md",
@@ -643,8 +721,8 @@ class EntryPointIsolation(unittest.TestCase):
             )
             for path in paths:
                 with self.subTest(path=path):
-                    result = subprocess.run(["git", "check-ignore", "--quiet", path],
-                                            cwd=root, capture_output=True, text=True)
+                    result = subprocess.run(["git", "check-ignore", "--quiet", path], cwd=root,
+                                            env=git_environment(), capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, path)
 
     def test_ci_command_ignores_ambient_and_working_directory_imports(self):

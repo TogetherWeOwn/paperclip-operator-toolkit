@@ -496,7 +496,7 @@ def incident_lines(source, errors):
 
 
 def memory_dir_for_root(root):
-    project = str(root.expanduser().resolve()).lstrip(os.sep).replace(os.sep, "-")
+    project = re.sub(r"[^A-Za-z0-9]", "-", str(root.expanduser().resolve())).lstrip("-")
     return Path.home() / ".claude/projects" / ("-" + project) / "memory"
 
 
@@ -653,8 +653,9 @@ def run(args):
     midnight = end.replace(hour=0, minute=0, second=0, microsecond=0)
     start = midnight - dt.timedelta(days=args.days - (1 if end != midnight else 0))
     lookup_start = start - dt.timedelta(days=7)
-    out = getattr(args, "output_dir", None) or Path(
-        os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "togetherweown/escape-ledger"
+    state_home = (Path(os.environ["XDG_STATE_HOME"]) if os.environ.get("XDG_STATE_HOME")
+                  else Path.home() / ".local/state")
+    out = getattr(args, "output_dir", None) or state_home / "togetherweown/escape-ledger"
     out.mkdir(parents=True, exist_ok=True)
     with lock(out / ".escape-ledger.lock", nonblocking=True):
         github = GitHub(args.token_helper or args.root / "gh_token.sh")
