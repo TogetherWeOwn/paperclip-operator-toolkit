@@ -1,0 +1,20 @@
+{
+  "_comment": "Deployed-app inventory for the release-lag check and weekly DORA digest. Explicit entries always survive discovery: the scheduled job unions these with every org repo that ships an enabled deploy-production workflow, so a new app (for example nntunev2 once it has production) inherits the check with zero config. To silence an app, add its full name to exclude.",
+  "org": "TogetherWeOwn",
+  "lag_hours": 24,
+  "stale_prod_days": 7,
+  "dora_window_days": 28,
+  "apps": [
+    {
+      "repo": "TogetherWeOwn/two-web-next",
+      "prod_workflow": "deploy-production",
+      "staging_workflow": "e2e-staging"
+    },
+    {
+      "repo": "TogetherWeOwn/two-bot-next",
+      "prod_workflow": "deploy-production",
+      "staging_workflow": "deploy-staging"
+    }
+  ],
+  "exclude": []
+}

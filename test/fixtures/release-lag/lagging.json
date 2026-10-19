@@ -1,0 +1,28 @@
+{
+  "_comment": "Production deployed 2 days ago but a staging-green candidate 50h old waits on a newer SHA. Expect status=lagging, alert=true.",
+  "now": "2026-10-19T03:00:00Z",
+  "prod_runs": [
+    {
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_ts": "2026-10-17T08:00:00Z",
+      "created_at": "2026-10-17T08:05:00Z",
+      "updated_at": "2026-10-17T08:20:00Z",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 101,
+      "url": "https://example.invalid/runs/101"
+    }
+  ],
+  "staging_runs": [
+    {
+      "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_ts": "2026-10-18T00:30:00Z",
+      "created_at": "2026-10-18T00:35:00Z",
+      "updated_at": "2026-10-18T01:00:00Z",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 202,
+      "url": "https://example.invalid/runs/202"
+    }
+  ]
+}
