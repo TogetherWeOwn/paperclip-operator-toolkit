@@ -1,9 +1,44 @@
 # Compiler-bearing execution-image source carrier
 
 **Unbuilt recipe, not a compiler/runtime receipt or change authorization.** This
-packet adds native C compiler, linker/archive tools, libc headers and pkg-config
-at a later, separately authorized image creation. Nothing installs at startup.
+packet adds native C compiler, linker/archive tools, libc headers, pkg-config
+and a Wasm-capable LLVM `clang` + `llvm-ar` at a later, separately authorized image creation. Nothing installs at startup.
 There is no image build, publication, install, restart or deployment workflow.
+
+## LLVM/Wasm extension: authority boundary
+
+This revision extends the GCC-only carrier (`f14c092`, accepted source head
+`cf9450dd657ef92da4d497142dca77543c6cbcfc`) with pinned `clang`, `clang-19`,
+`llvm` and `llvm-19` from the **same** Debian snapshot `20261007T000000Z`, so
+`/usr/bin/clang` (package `clang`) and `/usr/bin/llvm-ar` (package `llvm`) exist
+for a Wasm (`wasm32-unknown-unknown`) native-dependency proof. The previous
+exact-source acceptance covered only those GCC bytes. **It does not cover these
+bytes**: a fresh exact-source security acceptance of this revision's commit, tree
+and manifest blob is required, then every gate below ("Controlled future
+handoff") including the current-configuration adoption and go-live decision. The
+source packet authorizes nothing; `authorization` stays all-false.
+
+- Pins were read from the snapshot `Packages.xz` index (SHA-256
+  `7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498`, fetched
+  read-only); `clang-19`, `llvm-19` and `libllvm19` are `1:19.1.7-3+b1` there
+  (`libllvm19` deb SHA-256
+  `db0d614d61345ca710fb73e75105f1ec6e38898fa7b3aa99fa7eb7d8b0a11d57` matches the
+  index). `libllvm19` contains a `wasm32` target string, but only the build-time
+  object check below proves backend availability. Nothing was installed or built.
+- Cost: the dependency closure over the existing GCC set is about 50 extra
+  packages and an upper bound of roughly 400 MiB installed (`libllvm19`
+  127 MB, `llvm-19` 73 MB, `libclang-cpp19` 69 MB, `libclang1-19` 37 MB,
+  `libz3-4` 27 MB, ...), before subtracting anything the base already ships.
+  The adoption review must size the image/layer against the protected pool.
+- `lld`, `wasi-libc`, `libclang-rt`, `llvm-dev`, `clang-tools`, `g++` and Rust are
+  deliberately **not** added. A freestanding object is the Wasm evidence; whether
+  ring/rustls need a Wasm sysroot or further tools is the product proof's
+  question, answered by the Builder rerun, not by widening this recipe.
+- Build-time evidence, as `gosu 1000:1000`: `clang --version`, `llvm-ar --version`,
+  a scratch `clang --target=wasm32-unknown-unknown -ffreestanding -c` object whose
+  first four bytes are the Wasm magic `\0asm`, and `llvm-ar rc` of that object.
+  The scratch files live in `mktemp -d` and are removed on exit. This is not the
+  produced-image or wrapper-runtime receipt, and no Rustls run happens here.
 
 ## Exact inputs and what they prove
 
@@ -48,7 +83,9 @@ security refresh; reproducibility is not ongoing vulnerability acceptance.
 GCC supplies `/usr/bin/cc` and `/usr/bin/gcc`; binutils supplies `/usr/bin/ld` and
 `/usr/bin/ar`; libc6-dev supplies headers; pkg-config/pkgconf supports native
 dependency discovery. Native ring/rustls compilation motivates this minimum;
-there is no OpenSSL/C++ addition or unrelated product-builder substitution.
+there is no OpenSSL addition, no `g++`, and no unrelated product-builder
+substitution. (`clang-19` hard-depends on Debian's `libstdc++-14-dev` headers, so
+C++ *headers* arrive transitively; no C++ compiler package is requested.)
 Rust 1.98.1 is the inspected application's package-owned selection, **not a claim
 of an installed runtime toolchain**. This carrier neither installs Rust nor
 changes PATH, CC, linker selectors, model/env pins or the bounded Cargo wrapper.
@@ -83,7 +120,7 @@ The Linux validator is byte-bounded, duplicate-key/non-finite/unknown-field
 rejecting, and read-only. Non-regular files and symlinks are refused; nonblocking
 open and descriptor checks also refuse FIFO swaps without waiting for a writer. It binds source bytes and compares the recipe to a narrow permitted
 form: one fixed base, signed pinned APT native additions, and a build-time
-compiler check under `gosu 1000:1000`. It preserves root entrypoint initialization
+compiler check (GCC, `clang`, a Wasm object and `llvm-ar`) under `gosu 1000:1000`. It preserves root entrypoint initialization
 and the inherited drop to the execution user; no final non-root `USER` bypasses
 that initialization. No runtime command/entrypoint/env override is allowed. A successful result is `source_packet_consistent`, **never build-ready,
 installed, trusted or accepted**. It cannot verify external signatures, contents
@@ -158,7 +195,8 @@ upstream standard image or retarget its tag. Record actual derivative digest,
 base/architecture, exact carrier revision/byte hashes, builder identity, complete
 installed package/archive inventory and its own independently verified signed
 provenance. Do not invent an output digest from the recipe hash. Check executable
-compiler/linker/header/pkg-config visibility as uid/gid 1000:1000 in the **produced
+compiler/linker/header/pkg-config/`clang`/`llvm-ar` visibility, plus `clang --version`
+and a scratch `--target=wasm32-unknown-unknown` object, as uid/gid 1000:1000 in the **produced
 image** and later in the **actual wrapper runtime**. Build-time checks are not an
 exact-runtime compiler receipt. Keep those receipts outside this permanently
 source-only manifest; changing its null outputs to a fabricated receipt is refused.
