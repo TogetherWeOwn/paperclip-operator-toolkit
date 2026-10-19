@@ -116,6 +116,9 @@ name: CI
 #     test_liveness_reconciler.py       four recurring task-liveness gaps, native-path
 #                                       diagnostics, bounded owned repair, and owner-HOLD refusal
 #                                       — TOG-586
+#     test_shadow_seat_exclusion.py     shadow_seat_exclusion.py: seat-exact exclusion
+#                                       of append-once shadow seats from generic
+#                                       recovery/admission paths
 #     test_review_dedup.py              review_dedup.py: whether a covered head
 #                                       can be review-requested twice — one
 #                                       retry max on errors, unknown states
@@ -1116,6 +1119,13 @@ jobs:
       # owned repair. Pure fixtures: no API, database, credential or timer.
       - name: task liveness reconciler suite
         run: python3 -m unittest -v test_liveness_reconciler.py
+
+      # Shadow seat exclusion: seat-exact guard keeping append-once shadow
+      # seats out of generic recovery/admission (retrier, replay, comment
+      # wake, idle admission). Pure fixtures: no API, database, credential
+      # or timer.
+      - name: shadow seat exclusion suite
+        run: python3 -m unittest -v test_shadow_seat_exclusion.py
 
       # Admitted-PR closeout ledger: explicit registry (never a body parse),
       # exact-SHA check/review evidence, drafts and releases as owned

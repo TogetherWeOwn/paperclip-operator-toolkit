@@ -16,7 +16,12 @@ today or the shortcut a reimplementation would take:
   chat_channel shadow: row on an ordinary seat must stay eligible, and an
   ordinary origin on a shadow seat must stay excluded;
 - a filter that drops order or drops ordinary rows: filter_generic_candidates
-  keeps order and keeps every non-shadow row.
+  keeps order and keeps every non-shadow row;
+- nested cards and target/candidate slots silently re-admitted: every nested
+  container and every target/candidate slot is pinned per seat, with an
+  ordinary nested row staying eligible;
+- SQL exclusion present but malformed: the clause is asserted exactly and
+  executed against a scratch table, not substring-checked.
 
 Deterministic: no network, no credentials, no clock reads, no board, no live
 Paperclip mutation. Fixture rows are inline so the suite survives the live
@@ -141,11 +146,79 @@ class BoardRetrierTest(unittest.TestCase):
         )
         self.assertFalse(is_excluded_from_generic_recovery(row))
 
-    def test_sql_clause_names_both_seats(self):
-        clause = sql_exclusion_clause()
-        self.assertIn(SEAT_A, clause)
-        self.assertIn(SEAT_B, clause)
-        self.assertIn("NOT IN", clause)
+    def test_sql_clause_is_exact(self):
+        self.assertEqual(
+            sql_exclusion_clause(),
+            "assignee_agent_id NOT IN ("
+            "'4ed63cba-3c05-435b-8cf9-20b922264bd6',"
+            "'21060a96-b0cf-431c-a861-d89c47838944')",
+        )
+        self.assertEqual(
+            sql_exclusion_clause("issue.assignee_agent_id"),
+            "issue.assignee_agent_id NOT IN ("
+            "'4ed63cba-3c05-435b-8cf9-20b922264bd6',"
+            "'21060a96-b0cf-431c-a861-d89c47838944')",
+        )
+
+    def test_sql_clause_executes_excluding_only_seats(self):
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute("CREATE TABLE rows (assignee_agent_id TEXT)")
+            conn.executemany(
+                "INSERT INTO rows VALUES (?)",
+                [(SEAT_A,), (SEAT_B,), (ORDINARY,)],
+            )
+            kept = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT assignee_agent_id FROM rows WHERE "
+                    + sql_exclusion_clause()
+                )
+            }
+            self.assertEqual(kept, {ORDINARY})
+        finally:
+            conn.close()
+
+
+class NestedAndTargetSlotTest(unittest.TestCase):
+    # Literal container/slot names: importing the module's tuples would let a
+    # regression that drops a name silently unpin its own coverage.
+    NESTED_CONTAINERS = ("issue", "source", "candidate", "card", "origin")
+    TARGET_CANDIDATE_KEYS = (
+        "targetAgentId",
+        "target_agent_id",
+        "candidateAgentId",
+        "candidate_agent_id",
+    )
+
+    def test_each_nested_container_excludes_both_seats(self):
+        for container in self.NESTED_CONTAINERS:
+            for seat in (SEAT_A, SEAT_B):
+                with self.subTest(container=container, seat=seat):
+                    record = {container: {"assigneeAgentId": seat}}
+                    self.assertTrue(is_excluded_from_generic_recovery(record))
+
+    def test_target_and_candidate_slots_exclude_both_seats(self):
+        for key in self.TARGET_CANDIDATE_KEYS:
+            for seat in (SEAT_A, SEAT_B):
+                with self.subTest(key=key, seat=seat):
+                    self.assertTrue(is_excluded_from_generic_recovery({key: seat}))
+
+    def test_nested_target_slot_excludes(self):
+        for seat in (SEAT_A, SEAT_B):
+            with self.subTest(seat=seat):
+                record = {"issue": {"target_agent_id": seat}}
+                self.assertTrue(is_excluded_from_generic_recovery(record))
+                record = {"source": {"candidateAgentId": seat}}
+                self.assertTrue(is_excluded_from_generic_recovery(record))
+
+    def test_ordinary_nested_row_stays_eligible(self):
+        for container in self.NESTED_CONTAINERS:
+            with self.subTest(container=container):
+                record = {container: {"assigneeAgentId": ORDINARY}}
+                self.assertFalse(is_excluded_from_generic_recovery(record))
 
 
 class ReplayRewriteTest(unittest.TestCase):
