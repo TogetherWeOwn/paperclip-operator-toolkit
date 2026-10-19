@@ -52,8 +52,10 @@ checks = {
     "runner platform is a positive control": all(
         value in body for value in (
             '[[ "${RUNNER_OS:-}" == Linux ]]', '[[ "${RUNNER_ARCH:-}" == X64 ]]')),
+    # The checkout major version floats with Dependabot; the load-bearing assertion
+    # is `clean: true`, not the pin, so match any major.
     "checkout cleans the workspace": re.search(
-        r"(?ms)- uses: actions/checkout@v4\n\s+with:\n\s+clean: true", body) is not None,
+        r"(?ms)- uses: actions/checkout@v[0-9]+\n\s+with:\n\s+clean: true", body) is not None,
 }
 failed = [name for name, ok in checks.items() if not ok]
 for name, ok in checks.items():
