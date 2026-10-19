@@ -8,37 +8,32 @@ newest staging-green candidate, and nothing publishes deploy-health numbers.
 This script is the measuring half. A scheduled workflow runs it; the workflow
 owns alerting (one deduped issue per app) and the weekly DORA post.
 
-WHAT IT MEASURES, FROM PUBLIC GITHUB DATA ONLY. No Coolify credential, no
-private host, no secret of any kind. Per app:
+PUBLIC EVIDENCE, NOT WORKFLOW HEADS. Promotion workflows select targets
+independently of their trigger commit. For configured deploy jobs, the first
+pinned checkout's executed git-log result proves the target; the SAME job's
+completed_at is its verified deployment completion time. Skipped jobs are not
+deployments. Latest production target must also match public serving identity.
+Web staging uses its exercised-SHA title plus executed E2E/quality gates; bot
+staging uses its target checkout, including pinned workflow dispatches.
 
-  * live production commit = head SHA of the newest SUCCESSFUL run of the
-    app's production-deploy workflow (assumption: that workflow going green
-    means the commit is live; each app's deploy workflow is the authority).
-  * newest staging-green candidate = head SHA of the newest SUCCESSFUL run
-    of the app's staging-signal workflow (staging deploy, or staging E2E).
-  * lag alert = candidate exists on a different SHA than production AND the
-    candidate has been green longer than `lag_hours` (default 24).
-  * stale alert = no successful production deploy in `stale_prod_days`
-    (default 7), even with no candidate waiting.
+Lag requires a staging-green descendant of production waiting >24h. An old
+candidate already contained in production is not lag. Stale production means
+no successful actual deployment in 7d. Unknown evidence never closes an alert.
 
-DORA (trailing `dora_window_days`, default 28) from the production-deploy
-workflow runs in the window: deploy frequency, median lead time
-(commit -> deploy start), change-failure rate, median time to restore.
+DORA (trailing 28d): actual deployment-job successes/week; median resolved-target
+PR merge -> job completion (n/a without merge evidence); failed deployment-job
+attempts / all attempts; median failure -> next verified successful deployment.
+These are deployment-job proxies, not independently observed service incidents.
+Skipped/cancelled/neutral jobs are excluded. Lead sample coverage is reported.
 
-FAIL-CLOSED RULES, EACH BECAUSE THE SILENT VERSION HIDES A DRIFT:
+Discovery unions public org repos with explicit inventory for BOTH reports.
+An inherited app needs an explicit job/SHA/serving-identity contract before it
+can be measured; an unknown contract is visible and red, NEVER silently ok.
+Inventory and time-window histories paginate, with bounds failing closed.
 
-  1. AN UNREADABLE REPO IS NOT "IN SYNC". A failed fetch marks the app
-     `unknown` (measured=false), never `ok`. Exit 2 when nothing was
-     measured at all.
-  2. EQUAL SHAS ARE OK, NOT LAGGING. A slow clock alone is not drift; the
-     alert needs a greener candidate on a different SHA (or a stale prod).
-  3. DISCOVERY NEVER SHRINKS THE EXPLICIT LIST. `apps.json` entries always
-     survive; org discovery only ADDS repos that ship an enabled
-     `deploy-production` workflow, so a discovery outage cannot silence an
-     app that was explicitly configured.
-
-Exit status is the verdict, never prose (prose goes to --out / stdout):
-  0 every measured app ok, 1 at least one alert fires, 2 nothing measured.
+Exit status: 0 all apps measured ok; 1 measured drift; 2 ANY unknown or discovery
+failure (measured drift still syncs its alert). A discovery outage does not stop
+checking explicit apps. No secret or private host is required.
 
 Stdlib only, offline-testable: every verdict function takes plain dicts, and
 the test suite drives them from fixtures under test/fixtures/release-lag/.
@@ -46,8 +41,11 @@ the test suite drives them from fixtures under test/fixtures/release-lag/.
 
 import argparse
 import json
+import re
 import subprocess
 import sys
+from urllib.parse import urlencode
+from urllib.request import urlopen
 from datetime import datetime, timedelta, timezone
 
 DEFAULT_LAG_HOURS = 24
@@ -106,16 +104,17 @@ def fmt_duration(seconds):
 # --------------------------------------------------------------------------
 
 def normalize_run(raw):
-    """Project one GitHub workflow-run object onto the fields we score."""
-    head = raw.get("head_commit") or {}
+    """Workflow head is trigger metadata, NEVER a promoted/deployed target."""
     return {
-        "sha": raw.get("head_sha"),
-        "head_ts": head.get("timestamp"),
+        "sha": None,
+        "head_ts": None,
         "created_at": raw.get("created_at"),
         "updated_at": raw.get("updated_at"),
         "status": raw.get("status"),
         "conclusion": raw.get("conclusion"),
         "number": raw.get("id"),
+        "attempt": raw.get("run_attempt", 1),
+        "title": raw.get("display_title", ""),
         "url": raw.get("html_url"),
     }
 
@@ -143,7 +142,7 @@ def latest(runs):
 # --------------------------------------------------------------------------
 
 def evaluate_app(prod_runs, staging_runs, now, lag_hours=DEFAULT_LAG_HOURS,
-                 stale_days=DEFAULT_STALE_PROD_DAYS):
+                 stale_days=DEFAULT_STALE_PROD_DAYS, candidate_ahead="by-time"):
     """Score one app. Returns a verdict dict; alert=true means page the board.
 
     prod_runs / staging_runs are normalized run lists (possibly empty).
@@ -172,32 +171,50 @@ def evaluate_app(prod_runs, staging_runs, now, lag_hours=DEFAULT_LAG_HOURS,
         verdict["staging_sha"] = staging.get("sha")
         verdict["staging_green_at"] = staging.get("updated_at")
 
+    # A successful run whose target could not be resolved may supersede the
+    # older known deployment. Never score that older SHA as if it were live.
+    unresolved = [r for r in completed(prod_runs) if r.get("conclusion") == "success"
+                  and not r.get("sha")]
+    if unresolved and (prod is None or latest(unresolved + [prod]) in unresolved):
+        verdict.update(measured=False, reason="newest production target is unmeasured")
+        return verdict
+
     deployed_at = parse_ts(verdict["prod_deployed_at"])
-    if prod is None or deployed_at is None or now - deployed_at > timedelta(days=stale_days):
-        verdict["status"] = "stale-prod"
-        verdict["alert"] = True
-        verdict["reason"] = ("no successful production deploy in %d days"
-                             % stale_days)
-        if staging is not None and staging.get("sha") != verdict["prod_sha"]:
-            verdict["reason"] += ("; newer staging-green candidate %s waiting"
-                                  % staging.get("sha")[:7])
+    if prod is not None and (deployed_at is None or deployed_at > now):
+        verdict.update(measured=False, reason="invalid production deployment timestamp")
+        return verdict
+    if prod is None or now - deployed_at > timedelta(days=stale_days):
+        verdict.update(status="stale-prod", alert=True,
+                       reason="no successful production deploy in %d days" % stale_days)
         return verdict
 
     green_at = parse_ts(verdict["staging_green_at"])
-    if (staging is not None and prod is not None
-            and staging.get("sha") != prod.get("sha")
-            and green_at is not None
-            and now - green_at > timedelta(hours=lag_hours)):
-        lag = (now - green_at).total_seconds() / 3600.0
-        verdict["status"] = "lagging"
-        verdict["alert"] = True
-        verdict["lag_hours"] = round(lag, 1)
-        verdict["reason"] = ("staging-green %s is %.1fh old, production still on %s"
-                             % (staging.get("sha")[:7], lag, prod.get("sha")[:7]))
+    if staging is None or green_at is None or green_at > now:
+        verdict.update(measured=False, reason="no measured staging-green candidate")
         return verdict
 
     verdict["status"] = "ok"
-    verdict["reason"] = "production matches newest staging-green candidate"
+    if staging.get("sha") == prod.get("sha"):
+        verdict["reason"] = "production matches newest staging-green candidate"
+        return verdict
+    # The pure API supports chronological fixtures; live checks always pass
+    # an ancestry result (including None for an unreadable comparison).
+    if candidate_ahead == "by-time":
+        candidate_ahead = green_at > deployed_at
+    if candidate_ahead is None:
+        verdict.update(status="unknown", measured=False,
+                       reason="candidate ancestry is unmeasured")
+        return verdict
+    if not candidate_ahead:
+        verdict["reason"] = "production contains or is ahead of the staging candidate"
+        return verdict
+    if now - green_at > timedelta(hours=lag_hours):
+        lag = (now - green_at).total_seconds() / 3600.0
+        verdict.update(status="lagging", alert=True, lag_hours=round(lag, 1),
+                       reason="staging-green %s is %.1fh old, production still on %s"
+                       % (staging.get("sha")[:7], lag, prod.get("sha")[:7]))
+        return verdict
+    verdict["reason"] = "newer staging-green candidate is within the lag threshold"
     return verdict
 
 
@@ -209,22 +226,30 @@ def compute_dora(prod_runs, now, window_days=DEFAULT_DORA_WINDOW_DAYS):
     """Weekly-deploy-health numbers over the trailing window.
 
     deploy frequency  = successful prod deploys per week in the window.
-    lead time         = median(head commit -> run created) over successes.
-    change-fail rate  = non-success / completed in the window.
-    time to restore   = median(failed run -> next successful run).
+    lead time         = median(target merge -> verified completion).
+    change-fail rate  = failed deployment attempts / all deployment attempts.
+    time to restore   = median(failed attempt -> next successful deployment).
+    Explicit legacy head_ts fixtures retain their commit -> start proxy.
     """
     since = now - timedelta(days=window_days)
+    attempts = {"success", "failure", "timed_out", "startup_failure"}
     window = [r for r in completed(prod_runs)
-              if (parse_ts(r.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc)) >= since]
+              if r.get("conclusion") in attempts
+              and since <= (parse_ts(r.get("updated_at"))
+                            or datetime.min.replace(tzinfo=timezone.utc)) <= now]
     successes = [r for r in window if r.get("conclusion") == "success"]
-    failures = [r for r in window if r.get("conclusion") != "success"]
+    failures = [r for r in window if r.get("conclusion") in attempts - {"success"}]
 
     leads = []
     for run in successes:
-        made = parse_ts(run.get("head_ts"))
-        started = parse_ts(run.get("created_at"))
-        if made is not None and started is not None and started >= made:
-            leads.append((started - made).total_seconds())
+        # Live collectors set merged_at only for an associated merged PR whose
+        # merge commit is the resolved target. Legacy normalized fixtures can
+        # still supply the older head_ts -> created_at proxy explicitly.
+        made = parse_ts(run.get("merged_at") or run.get("head_ts"))
+        landed = parse_ts(run.get("updated_at") if run.get("merged_at")
+                          else run.get("created_at"))
+        if made is not None and landed is not None and landed >= made:
+            leads.append((landed - made).total_seconds())
 
     by_time = sorted(window, key=lambda r: parse_ts(r.get("updated_at"))
                      or datetime.min.replace(tzinfo=timezone.utc))
@@ -251,6 +276,7 @@ def compute_dora(prod_runs, now, window_days=DEFAULT_DORA_WINDOW_DAYS):
         "failed": len(failures),
         "change_fail_rate": round(len(failures) / len(window), 4) if window else None,
         "median_lead_seconds": med_lead,
+        "lead_samples": len(leads),
         "median_restore_seconds": med_restore,
         "incidents": len(gaps),
     }
@@ -274,8 +300,8 @@ def merge_apps(explicit, discovered):
             continue
         merged[repo] = {
             "repo": repo,
-            "prod_workflow": PROD_WORKFLOW_BASENAME,
-            "staging_workflow": None,
+            "prod_workflow": found.get("prod_workflow", PROD_WORKFLOW_BASENAME),
+            "staging_workflow": found.get("staging_workflow"),
         }
     return [merged[repo] for repo in sorted(merged)]
 
@@ -304,16 +330,21 @@ def render_check_markdown(results):
 
 def render_dora_markdown(results, window_days):
     lines = ["# DORA weekly digest (trailing %d days)" % window_days, "",
-             "| app | deploys/wk | median lead | change-fail | median restore |",
-             "| --- | --- | --- | --- | --- |"]
+             "Deployment-job proxies, not independently observed service incidents.",
+             "Lead is target PR merge to verified completion; n/a means no merge evidence.", "",
+             "| app | deploys/wk | median lead | lead samples | change-fail | median restore |",
+             "| --- | --- | --- | --- | --- | --- |"]
     for repo in sorted(results):
         dora = results[repo]
+        if dora is None:
+            lines.append("| %s | unknown | n/a | n/a | n/a | n/a |" % repo)
+            continue
         cfr = ("%.1f%%" % (dora["change_fail_rate"] * 100)
                if dora["change_fail_rate"] is not None else "n/a")
-        lines.append("| %s | %s (%d) | %s | %s | %s |"
+        lines.append("| %s | %s (%d) | %s | %d/%d | %s | %s |"
                      % (repo, dora["deploys_per_week"], dora["deploys"],
-                        fmt_duration(dora["median_lead_seconds"]), cfr,
-                        fmt_duration(dora["median_restore_seconds"])))
+                        fmt_duration(dora["median_lead_seconds"]), dora["lead_samples"],
+                        dora["deploys"], cfr, fmt_duration(dora["median_restore_seconds"])))
     return "\n".join(lines) + "\n"
 
 
@@ -321,43 +352,49 @@ def render_dora_markdown(results, window_days):
 # live GitHub layer (thin; everything above stays offline-testable)
 # --------------------------------------------------------------------------
 
-def gh_api(path, per_page=50):
-    """GET one GitHub REST path via gh; raises RuntimeError with stderr.
-
-    NOTE: per_page travels in the query string, never via `-f`. gh turns
-    `-f` fields into something the list endpoints reject (measured 404 on
-    actions/workflows, 2026-10-19); the query-string form paginates cleanly.
-    """
-    separator = "&" if "?" in path else "?"
-    url = "%s%sper_page=%d" % (path, separator, per_page)
+def gh_command(*args):
     try:
-        # No --paginate: it prints one JSON body per page, which is not a
-        # single JSON document. One page (max 100 rows) covers every call
-        # here: workflow lists, recent runs, and this org's repo inventory.
-        proc = subprocess.run(
-            ["gh", "api", url],
-            capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError("gh api failed: %s" % exc)
-    if proc.returncode != 0:
-        raise RuntimeError("gh api %s: %s" % (path, proc.stderr.strip()[-500:]))
+        raise RuntimeError("gh failed: %s" % exc) from exc
+    if proc.returncode:
+        raise RuntimeError("gh failed: %s" % proc.stderr.strip()[-500:])
+    return proc.stdout
+
+
+def gh_json(path):
     try:
-        payload = json.loads(proc.stdout or "null")
-    except ValueError:
-        raise RuntimeError("gh api %s returned non-JSON" % path)
-    if isinstance(payload, list):
-        return payload
-    for key in ("workflow_runs", "workflows", "repositories"):
-        if isinstance(payload.get(key), list):
-            return payload[key]
-    return []
+        return json.loads(gh_command("api", path))
+    except ValueError as exc:
+        raise RuntimeError("gh api %s returned non-JSON" % path) from exc
+
+
+def gh_api(path, per_page=100, max_pages=20):
+    """Read complete lists, or refuse at the bound; never score a partial page."""
+    separator = "&" if "?" in path else "?"
+    rows = []
+    for page in range(1, max_pages + 1):
+        payload = gh_json("%s%sper_page=%d&page=%d" % (path, separator, per_page, page))
+        batch = payload if isinstance(payload, list) else None
+        if isinstance(payload, dict):
+            for key in ("workflow_runs", "workflows", "repositories", "jobs"):
+                if isinstance(payload.get(key), list):
+                    batch = payload[key]
+                    break
+        if batch is None:
+            raise RuntimeError("gh api %s returned an unexpected list shape" % path)
+        rows.extend(batch)
+        if len(batch) < per_page:
+            return rows
+    raise RuntimeError("gh api %s exceeds the %d-page measurement bound" % (path, max_pages))
 
 
 def workflow_id_for(repo, name):
     """Resolve a workflow name or file to its numeric id; None when absent."""
     for workflow in gh_api("repos/%s/actions/workflows" % repo):
-        candidates = {str(workflow.get("name", "")).lower(),
-                      str(workflow.get("path", "")).split("/")[-1].lower()}
+        filename = str(workflow.get("path", "")).split("/")[-1].lower()
+        candidates = {str(workflow.get("name", "")).lower(), filename,
+                      re.sub(r"\.ya?ml$", "", filename)}
         wanted = str(name or "").lower()
         if wanted in candidates or wanted == str(workflow.get("id")):
             if str(workflow.get("state", "")).lower() != "active":
@@ -366,16 +403,146 @@ def workflow_id_for(repo, name):
     return None
 
 
-def fetch_runs(repo, workflow, limit=50):
-    """Newest-first normalized runs for one workflow; [] when unresolvable."""
+def fetch_runs(repo, workflow, since=None):
+    """Complete bounded time window, including successes hidden behind failures."""
     if not workflow:
-        return []
+        raise RuntimeError("no workflow measurement contract configured")
     wid = workflow_id_for(repo, workflow)
     if wid is None:
-        return []
-    raw = gh_api("repos/%s/actions/workflows/%s/runs" % (repo, wid),
-                 per_page=limit)
-    return [normalize_run(run) for run in raw[:limit]]
+        raise RuntimeError("configured workflow %s is absent or disabled" % workflow)
+    query = {"branch": "main"}
+    if since is not None:
+        query["created"] = ">=" + since.isoformat()
+    raw = gh_api("repos/%s/actions/workflows/%s/runs?%s"
+                 % (repo, wid, urlencode(query)), max_pages=10)
+    return [normalize_run(run) for run in raw]
+
+
+def checkout_sha(log):
+    """Resolved ref of the FIRST checkout in our allowlisted deploy jobs.
+
+    Bot jobs check out current tooling a second time. Taking the last hash
+    would measure that tooling instead of the deployed target. Require both
+    the pinned ref and checkout's executed git-log result to agree. Raw logs
+    are never printed or persisted by this detector.
+    """
+    lines = [re.sub(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", line)
+             for line in log.splitlines()]
+    in_checkout = False
+    ref = None
+    for index, line in enumerate(lines):
+        if "##[group]Run actions/checkout@" in line:
+            if in_checkout:
+                break
+            in_checkout = True
+        if not in_checkout:
+            continue
+        match = re.fullmatch(r"\s+ref: ([0-9a-f]{40})", line)
+        if match:
+            ref = match.group(1)
+        if re.fullmatch(r"\[command\].*/git log -1 --format=%H", line):
+            sha = lines[index + 1] if index + 1 < len(lines) else ""
+            if re.fullmatch(r"[0-9a-f]{40}", sha) and sha == ref:
+                return sha
+            break
+        if line.startswith("##[group]Run ") and "actions/checkout@" not in line:
+            break
+    raise RuntimeError("first deployment checkout has no verified pinned SHA")
+
+
+def run_jobs(repo, run):
+    return gh_api("repos/%s/actions/runs/%s/attempts/%s/jobs"
+                  % (repo, run["number"], run["attempt"]))
+
+
+def resolve_job_run(repo, run, pattern):
+    jobs = [job for job in run_jobs(repo, run)
+            if re.fullmatch(pattern, job.get("name", ""))]
+    if len(jobs) != 1:
+        raise RuntimeError("deployment job contract missing or ambiguous in run %s" % run["number"])
+    job = jobs[0]
+    measured = dict(run, status=job.get("status"), conclusion=job.get("conclusion"),
+                    updated_at=job.get("completed_at"), job_id=job["id"])
+    if measured["conclusion"] == "success":
+        log = gh_command("api", "--allow-escape-sequences",
+                         "repos/%s/actions/jobs/%s/logs" % (repo, job["id"]))
+        measured["sha"] = checkout_sha(log)
+    return measured
+
+
+def measure_production(app, runs):
+    pattern = app.get("prod_job")
+    if not pattern:
+        raise RuntimeError("production deployment-job contract is not configured")
+    return [resolve_job_run(app["repo"], run, pattern) for run in completed(runs)]
+
+
+def measure_staging(app, runs):
+    candidates = sorted((r for r in completed(runs) if r["conclusion"] == "success"),
+                        key=lambda r: parse_ts(r.get("updated_at"))
+                        or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    for run in candidates:
+        if app.get("staging_source") == "web-e2e-title":
+            match = re.fullmatch(r"e2e-staging deploy ([0-9a-f]{40})", run["title"])
+            if not match:
+                raise RuntimeError("staging E2E title has no exercised SHA")
+            jobs = run_jobs(app["repo"], run)
+            journeys = [j for j in jobs if j.get("name") == "staging-journeys"]
+            quality = [j for j in jobs if j.get("name") == "staging-quality / quality"]
+            steps = {s.get("name"): s.get("conclusion")
+                     for j in quality for s in j.get("steps", [])}
+            required = ("Lighthouse performance budgets (mobile, ci/lighthouserc.cjs)",
+                        "Lighthouse quality scores (desktop, categories vs ci/quality-budget.json)")
+            if (len(journeys) == len(quality) == 1
+                    and all(j.get("conclusion") == "success" for j in journeys + quality)
+                    and all(steps.get(name) == "success" for name in required)):
+                return [dict(run, sha=match.group(1))]
+        elif app.get("staging_job"):
+            measured = resolve_job_run(app["repo"], run, app["staging_job"])
+            if measured["conclusion"] == "success":
+                return [measured]
+        else:
+            raise RuntimeError("staging SHA measurement contract is not configured")
+    return []
+
+
+def read_live_sha(app):
+    url = app.get("prod_url")
+    path = app.get("prod_sha_path")
+    if not isinstance(url, str) or not url.startswith("https://"):
+        raise RuntimeError("public production identity endpoint is not configured")
+    if not isinstance(path, str) or not path or any(not key for key in path.split(".")):
+        raise RuntimeError("public production identity SHA path is not configured")
+    try:
+        with urlopen(url, timeout=20) as response:
+            body = response.read(65537)
+        if len(body) > 65536:
+            raise ValueError("oversized response")
+        payload = json.loads(body)
+        for key in path.split("."):
+            payload = payload[key]
+        if not isinstance(payload, str) or not re.fullmatch(r"[0-9a-f]{40}", payload):
+            raise ValueError("identity is not a full SHA")
+        return payload
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        code = getattr(exc, "code", None)
+        detail = " (HTTP %s)" % code if code is not None else ""
+        raise RuntimeError("public production identity is unmeasured" + detail) from exc
+
+
+def add_merge_times(repo, runs):
+    cache = {}
+    for run in successful(runs):
+        sha = run["sha"]
+        if sha not in cache:
+            try:
+                prs = gh_api("repos/%s/commits/%s/pulls" % (repo, sha))
+                times = [pr.get("merged_at") for pr in prs
+                         if pr.get("merge_commit_sha") == sha and pr.get("merged_at")]
+                cache[sha] = min(times) if times else None
+            except RuntimeError:
+                cache[sha] = None
+        run["merged_at"] = cache[sha]
 
 
 def discover_repos(org):
@@ -383,29 +550,37 @@ def discover_repos(org):
     found = []
     for repo in gh_api("orgs/%s/repos" % org, per_page=100):
         full = repo.get("full_name")
-        if not full or repo.get("archived"):
+        if not full or repo.get("archived") or repo.get("private"):
             continue
         try:
             if workflow_id_for(full, PROD_WORKFLOW_BASENAME) is not None:
-                found.append({"repo": full})
+                staging = next((name for name in ("e2e-staging", "deploy-staging")
+                                if workflow_id_for(full, name) is not None), None)
+                found.append({"repo": full, "staging_workflow": staging})
         except RuntimeError:
-            continue
+            # Preserve an unreadable discovered repo as unknown rather than
+            # silently shrinking the inventory during a partial outage.
+            found.append({"repo": full})
     return found
 
 
 def compare_ahead_by(repo, base_sha, head_sha):
     """Commits head is ahead of base; None when the compare cannot be read."""
-    if not base_sha or not head_sha or base_sha == head_sha:
+    if not base_sha or not head_sha:
+        return None
+    if base_sha == head_sha:
         return 0
     try:
-        proc = subprocess.run(
-            ["gh", "api", "repos/%s/compare/%s...%s" % (repo, base_sha, head_sha)],
-            capture_output=True, text=True, timeout=60)
-        if proc.returncode != 0:
-            return None
-        return json.loads(proc.stdout).get("ahead_by")
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
+        result = gh_json("repos/%s/compare/%s...%s" % (repo, base_sha, head_sha))
+        if result.get("status") in ("behind", "identical"):
+            return 0
+        ahead = result.get("ahead_by")
+        if (result.get("status") == "ahead" and result.get("behind_by") == 0
+                and isinstance(ahead, int) and ahead > 0):
+            return ahead
+    except (RuntimeError, AttributeError):
+        pass
+    return None
 
 
 def load_config(path):
@@ -417,84 +592,144 @@ def load_config(path):
 # CLI
 # --------------------------------------------------------------------------
 
-def cmd_check(args):
-    now = parse_ts(args.now) or datetime.now(timezone.utc)
-    try:
-        config = load_config(args.apps)
-    except (OSError, ValueError) as exc:
-        print("ERROR: cannot read apps config: %s" % exc, file=sys.stderr)
-        return 2
-    org = config.get("org")
-    explicit = config.get("apps", [])
+def configured_apps(args, config):
+    errors = []
+    discovered = []
+    if config.get("org") and not args.no_discover:
+        try:
+            discovered = discover_repos(config["org"])
+        except RuntimeError:
+            errors.append("org discovery unavailable; explicit apps still checked")
+    excluded = set(config.get("exclude", []))
+    apps = [app for app in merge_apps(config.get("apps", []), discovered)
+            if app["repo"] not in excluded]
+    return apps, errors
+
+
+def collect(args, config, now, window):
+    apps, errors = configured_apps(args, config)
+    results, dora = {}, {}
     lag_hours = config.get("lag_hours", DEFAULT_LAG_HOURS)
     stale_days = config.get("stale_prod_days", DEFAULT_STALE_PROD_DAYS)
-    try:
-        discovered = discover_repos(org) if org and not args.no_discover else []
-    except RuntimeError as exc:
-        print("ERROR: discovery failed: %s" % exc, file=sys.stderr)
-        return 2
-    apps = merge_apps(explicit, discovered)
-    excluded = set(config.get("exclude", []))
-    apps = [a for a in apps if a["repo"] not in excluded]
-
-    results = {}
-    measured = 0
-    alerted = 0
+    since = now - timedelta(days=max(window, stale_days, lag_hours / 24) + 1)
     for app in apps:
         repo = app["repo"]
-        try:
-            prod_runs = fetch_runs(repo, app.get("prod_workflow"))
-            staging_runs = fetch_runs(repo, app.get("staging_workflow"), limit=10)
-        except RuntimeError as exc:
-            print("WARN: %s unmeasured: %s" % (repo, exc), file=sys.stderr)
-            results[repo] = evaluate_app([], [], now, lag_hours, stale_days)
-            continue
-        verdict = evaluate_app(prod_runs, staging_runs, now, lag_hours, stale_days)
-        if verdict["status"] == "lagging":
-            verdict["commits_behind"] = compare_ahead_by(
-                repo, verdict["prod_sha"], verdict["staging_sha"])
+        verdict = evaluate_app([], [], now)
         verdict["key"] = dedupe_key(repo)
-        results[repo] = verdict
-        if verdict["measured"]:
-            measured += 1
-        if verdict["alert"]:
-            alerted += 1
+        results[repo], dora[repo] = verdict, None
+        try:
+            prod_runs = measure_production(app, fetch_runs(repo, app.get("prod_workflow"), since))
+            add_merge_times(repo, prod_runs)
+            dora[repo] = compute_dora(prod_runs, now, window)
+            staging_runs = measure_staging(app, fetch_runs(repo, app.get("staging_workflow"), since))
+            prod = latest(successful(prod_runs))
+            staging = latest(successful(staging_runs))
+            if prod is not None and read_live_sha(app) != prod["sha"]:
+                raise RuntimeError("serving SHA differs from latest verified production target")
+            ahead = compare_ahead_by(repo, prod["sha"], staging["sha"]) if prod and staging else None
+            verdict = evaluate_app(prod_runs, staging_runs, now, lag_hours, stale_days,
+                                   candidate_ahead=None if ahead is None else ahead > 0)
+            # A successfully read empty production window proves staleness,
+            # unlike a failed read (which reaches the exception path).
+            if not prod_runs and not staging_runs:
+                verdict.update(status="stale-prod", measured=True, alert=True,
+                               reason="no successful production deploy in %d days" % stale_days)
+            verdict["key"] = dedupe_key(repo)
+            verdict["commits_behind"] = ahead
+            results[repo] = verdict
+        except RuntimeError as exc:
+            verdict["reason"] = str(exc)
+            print("WARN: %s unmeasured: %s" % (repo, exc), file=sys.stderr)
+    return {"now": now.isoformat(), "results": results, "dora": dora,
+            "dora_window_days": window, "errors": errors}
 
-    payload = {"now": now.isoformat(), "results": results}
-    if args.out:
-        with open(args.out, "w", encoding="utf-8") as handle:
+
+def check_exit(payload):
+    results = payload["results"]
+    if payload.get("errors") or not results or any(not v["measured"] for v in results.values()):
+        return 2
+    return 1 if any(v["alert"] for v in results.values()) else 0
+
+
+def write_json(path, payload):
+    if path:
+        with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
+
+
+def cmd_check(args):
+    now = parse_ts(args.now) or datetime.now(timezone.utc)
+    config = load_config(args.apps)
+    window = config.get("dora_window_days", DEFAULT_DORA_WINDOW_DAYS)
+    payload = collect(args, config, now, window)
+    write_json(args.out, payload)
+    text = render_check_markdown(payload["results"])
     if args.markdown:
         with open(args.markdown, "w", encoding="utf-8") as handle:
-            handle.write(render_check_markdown(results))
-    print(render_check_markdown(results))
-    if measured == 0:
-        return 2
-    return 1 if alerted else 0
+            handle.write(text)
+    print(text)
+    for error in payload["errors"]:
+        print("WARN: " + error, file=sys.stderr)
+    return check_exit(payload)
 
 
 def cmd_dora(args):
-    now = parse_ts(args.now) or datetime.now(timezone.utc)
-    try:
+    if args.from_check:
+        payload = load_config(args.from_check)
+    else:
         config = load_config(args.apps)
-    except (OSError, ValueError) as exc:
-        print("ERROR: cannot read apps config: %s" % exc, file=sys.stderr)
-        return 2
-    window = args.window_days or config.get("dora_window_days", DEFAULT_DORA_WINDOW_DAYS)
-    results = {}
-    for app in config.get("apps", []):
-        repo = app["repo"]
-        try:
-            prod_runs = fetch_runs(repo, app.get("prod_workflow"), limit=100)
-        except RuntimeError as exc:
-            print("WARN: %s unmeasured: %s" % (repo, exc), file=sys.stderr)
-            continue
-        results[repo] = compute_dora(prod_runs, now, window)
-    if args.out:
-        with open(args.out, "w", encoding="utf-8") as handle:
-            json.dump({"now": now.isoformat(), "results": results}, handle, indent=2)
-    print(render_dora_markdown(results, window))
-    return 0 if results else 2
+        window = args.window_days or config.get("dora_window_days", DEFAULT_DORA_WINDOW_DAYS)
+        payload = collect(args, config, parse_ts(args.now) or datetime.now(timezone.utc), window)
+    results = payload["dora"]
+    write_json(args.out, {"now": payload["now"], "results": results, "errors": payload["errors"]})
+    print(render_dora_markdown(results, payload["dora_window_days"]))
+    return 2 if (not results or payload["errors"] or any(v is None for v in results.values())) else 0
+
+
+def find_open_issue(repo, title_prefix):
+    issues = json.loads(gh_command("issue", "list", "--repo", repo, "--state", "open",
+                                  "--search", '"%s" in:title' % title_prefix,
+                                  "--limit", "100", "--json", "number,title,body"))
+    matches = [issue for issue in issues if issue["title"].startswith(title_prefix)]
+    if len(matches) > 1:
+        raise RuntimeError("multiple open issues match " + title_prefix)
+    return matches[0] if matches else None
+
+
+def sync_alerts(repo, verdicts):
+    for app, verdict in sorted(verdicts.items()):
+        if not verdict.get("measured") or verdict.get("status") == "unknown":
+            continue  # Unknown NEVER closes an existing alert.
+        key = dedupe_key(app)
+        issue = find_open_issue(repo, "[%s]" % key)
+        if verdict.get("alert"):
+            state = "key: %s\nprod: %s\ncandidate: %s\nstatus: %s" % (
+                key, verdict.get("prod_sha"), verdict.get("staging_sha"), verdict["status"])
+            body = ("Production for `%s` is drifting.\n\n%s\n\n```\n%s\n```\n"
+                    % (app, verdict["reason"], state))
+            if issue is None:
+                gh_command("issue", "create", "--repo", repo, "--title",
+                           "[%s] Production is behind (%s)" % (key, verdict["status"]), "--body", body)
+            elif not all(line in (issue.get("body") or "") for line in state.splitlines()):
+                gh_command("issue", "comment", "--repo", repo, str(issue["number"]), "--body", body)
+                gh_command("issue", "edit", "--repo", repo, str(issue["number"]), "--body", body)
+        elif verdict.get("status") == "ok" and issue is not None:
+            gh_command("issue", "close", "--repo", repo, str(issue["number"]),
+                       "--reason", "completed", "--comment", "Recovered: " + verdict["reason"])
+
+
+def publish_digest(repo, text):
+    prefix = "[dora-weekly]"
+    issue = find_open_issue(repo, prefix)
+    if issue is None:
+        url = gh_command("issue", "create", "--repo", repo, "--title", prefix + " Deploy health digest",
+                         "--body", "Weekly trailing-window deployment metrics from release_lag.py.").strip()
+        number = url.rsplit("/", 1)[-1]
+        if not number.isdigit():
+            raise RuntimeError("issue create did not return an issue URL")
+    else:
+        number = str(issue["number"])
+    gh_command("issue", "comment", "--repo", repo, number, "--body", text)
 
 
 def main(argv=None):
@@ -509,10 +744,28 @@ def main(argv=None):
     dora = sub.add_parser("dora", help="weekly DORA numbers per app")
     dora.add_argument("--out", default=None)
     dora.add_argument("--window-days", type=int, default=None)
+    dora.add_argument("--from-check", default=None, help="reuse the check's inventory and measured histories")
+    sync = sub.add_parser("sync", help="sync measured alert verdicts to GitHub issues")
+    sync.add_argument("--repo", required=True)
+    sync.add_argument("--input", required=True)
+    digest = sub.add_parser("publish-digest", help="post an already-rendered weekly digest")
+    digest.add_argument("--repo", required=True)
+    digest.add_argument("--markdown", required=True)
     args = parser.parse_args(argv)
-    if args.command == "check":
-        return cmd_check(args)
-    return cmd_dora(args)
+    try:
+        if args.command == "check":
+            return cmd_check(args)
+        if args.command == "dora":
+            return cmd_dora(args)
+        if args.command == "sync":
+            sync_alerts(args.repo, load_config(args.input)["results"])
+        else:
+            with open(args.markdown, encoding="utf-8") as handle:
+                publish_digest(args.repo, handle.read())
+        return 0
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

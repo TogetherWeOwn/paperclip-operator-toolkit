@@ -1,23 +1,9 @@
 name: release-lag
 
-# Release-lag + DORA for every deployed app (release_lag.py does the math).
-#
-# WHAT RUNS, AND WHEN. Daily: compare each deployed app's live production
-# commit against its newest staging-green candidate and file one deduped
-# issue per drifting app (key release-lag:v1:{owner}/{repo} in the title, so
-# a second day of the same drift comments instead of opening a duplicate,
-# and recovery closes the issue). Mondays: post the trailing-28-day DORA
-# numbers as a comment on the standing digest issue.
-#
-# Apps come from ops/release-lag/apps.json UNION every org repo shipping an
-# enabled deploy-production workflow, so a new app inherits the check.
-#
-# ROLLBACK. Disable this workflow (Actions -> release-lag -> Disable
-# workflow). That stops both the alerts and the digest; open lag issues stay
-# open and must be closed by hand once production catches up.
-#
-# Public data only: default GITHUB_TOKEN reads public workflow runs and
-# manages issues in this repo. No secret, no private host, no credential.
+# Daily deduped alerts; Monday trailing-window DORA digest. Unknown never
+# closes an alert. The digest runs even when the lag check or issue sync fails.
+# Rollback: disable this workflow. Existing alert issues remain open.
+# Public evidence only; default token manages issues only in this repository.
 
 on:
   schedule:
@@ -39,96 +25,50 @@ jobs:
     name: monitor
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Check out detector
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # main 2026-10-19
+        with:
+          persist-credentials: false
 
       - name: Lag check
         id: check
         run: |
-          set -uo pipefail
+          set -euo pipefail
           rc=0
           python3 release_lag.py check \
-            --out /tmp/release-lag.json \
-            --markdown /tmp/release-lag.md || rc=$?
+            --out "$RUNNER_TEMP/release-lag.json" \
+            --markdown "$RUNNER_TEMP/release-lag.md" || rc=$?
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          cat /tmp/release-lag.md >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f "$RUNNER_TEMP/release-lag.md" ]]; then
+            cat "$RUNNER_TEMP/release-lag.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "CHECK_RC=$rc" >> "$GITHUB_ENV"
 
       - name: Sync lag issues
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: ${{ !cancelled() }}
         run: |
-          set -uo pipefail
-          [[ -f /tmp/release-lag.json ]] || { echo "no verdict file; nothing to sync"; exit 0; }
-          python3 - <<'PY'
-          import json, subprocess
-
-          REPO = "${{ github.repository }}"
-
-          def gh(*args):
-              proc = subprocess.run(["gh"] + list(args), capture_output=True, text=True, timeout=120)
-              if proc.returncode != 0:
-                  raise RuntimeError("gh %s: %s" % (" ".join(args), proc.stderr.strip()[-300:]))
-              return proc.stdout
-
-          def open_issue(key):
-              out = gh("issue", "list", "--repo", REPO, "--search", key + " in:title",
-                       "--state", "open", "--json", "number,body", "--jq", ".[0] // empty")
-              return json.loads(out) if out.strip() else None
-
-          with open("/tmp/release-lag.json", encoding="utf-8") as handle:
-              verdicts = json.load(handle)["results"]
-
-          for app, verdict in sorted(verdicts.items()):
-              key = verdict.get("key") or ("release-lag:v1:" + app)
-              issue = open_issue(key)
-              if verdict.get("alert"):
-                  state = ("key: %s\nprod: %s\ncandidate: %s\nstatus: %s"
-                           % (key, verdict.get("prod_sha"), verdict.get("staging_sha"),
-                              verdict.get("status")))
-                  title = "[%s] Production is behind (%s)" % (key, verdict.get("status"))
-                  body = ("Production for `%s` is drifting.\n\n- status: %s\n- production: `%s`\n- candidate: `%s`\n- detail: %s\n\n```\n%s\n```\n"
-                          % (app, verdict.get("status"), verdict.get("prod_sha"),
-                             verdict.get("staging_sha"), verdict.get("reason"), state))
-                  if issue is None:
-                      gh("issue", "create", "--repo", REPO, "--title", title, "--body", body)
-                      print("opened alert for " + app)
-                  elif all(line in (issue.get("body") or "") for line in state.splitlines()):
-                      print("alert for " + app + " already current; silent")
-                  else:
-                      gh("issue", "comment", "--repo", REPO, str(issue["number"]), "--body", body)
-                      print("updated alert for " + app)
-              else:
-                  if issue is not None:
-                      gh("issue", "comment", "--repo", REPO, str(issue["number"]),
-                         "--body", "Recovered: %s. Closing." % verdict.get("reason"))
-                      gh("issue", "close", "--repo", REPO, str(issue["number"]),
-                         "--reason", "completed")
-                      print("closed recovered alert for " + app)
-          PY
-
-      - name: Fail the run while an alert fires
-        if: always()
-        run: |
-          [[ "${CHECK_RC:-0}" != "1" ]] || { echo "release lag is firing; see synced issues"; exit 1; }
-          [[ "${CHECK_RC:-0}" == "0" ]] || { echo "lag check unmeasured (rc=${CHECK_RC:-?})"; exit 1; }
+          set -euo pipefail
+          [[ -f "$RUNNER_TEMP/release-lag.json" ]] || { echo "no measured verdict file"; exit 1; }
+          python3 release_lag.py sync --repo "$GH_REPO" --input "$RUNNER_TEMP/release-lag.json"
 
       - name: Weekly DORA digest
-        if: github.event.schedule == '47 8 * * 1' || github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: ${{ !cancelled() && (github.event.schedule == '47 8 * * 1' || github.event_name == 'workflow_dispatch') }}
         run: |
-          set -uo pipefail
-          python3 release_lag.py dora --out /tmp/dora.json > /tmp/dora.md
-          cat /tmp/dora.md >> "$GITHUB_STEP_SUMMARY"
-          TITLE="[dora-weekly] Deploy health digest"
-          NUM="$(gh issue list --repo "${{ github.repository }}" --search "$TITLE in:title" \
-            --state open --json number --jq '.[0].number // empty')"
-          if [[ -z "$NUM" ]]; then
-            NUM="$(gh issue create --repo "${{ github.repository }}" --title "$TITLE" \
-              --body "Standing digest: every Monday this workflow posts the trailing-28-day DORA numbers per deployed app (deploy frequency, lead time, change-failure rate, time to restore). Source: public workflow runs via release_lag.py." \
-              --jq '.number')"
-          fi
-          gh issue comment --repo "${{ github.repository }}" "$NUM" --body "$(cat /tmp/dora.md)"
+          set -euo pipefail
+          rc=0
+          # Reuse the exact inventory/history snapshot: no second cross-repo crawl.
+          python3 release_lag.py dora --from-check "$RUNNER_TEMP/release-lag.json" \
+            --out "$RUNNER_TEMP/dora.json" > "$RUNNER_TEMP/dora.md" || rc=$?
+          [[ -s "$RUNNER_TEMP/dora.json" ]] || { echo "no DORA snapshot"; exit 1; }
+          cat "$RUNNER_TEMP/dora.md" >> "$GITHUB_STEP_SUMMARY"
+          python3 release_lag.py publish-digest --repo "$GH_REPO" --markdown "$RUNNER_TEMP/dora.md"
+          exit "$rc"
+
+      - name: Fail the run for alerts or incomplete measurement
+        if: ${{ !cancelled() }}
+        run: |
+          [[ "${CHECK_RC:-2}" == "0" ]] || { echo "release lag alert or unmeasured app (rc=${CHECK_RC:-2}); see summary"; exit 1; }
