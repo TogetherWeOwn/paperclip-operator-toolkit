@@ -2246,7 +2246,7 @@ jobs:
       #
       # The suite builds its own scratch git repo and its own audit ref, so it
       # needs neither `origin/main` nor any remote branch. That is deliberate:
-      # actions/checkout@v4 clones --depth=1 --single-branch, and an earlier
+      # actions/checkout@v7 clones --depth=1 --single-branch, and an earlier
       # revision that pinned fixtures to real refs would have been a
       # permanently red step that never once scored a mutant.
       # Pin-conformance and fork-disclosure gates whose subjects live outside
