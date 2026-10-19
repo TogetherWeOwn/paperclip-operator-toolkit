@@ -703,6 +703,14 @@ class EntryPointIsolation(unittest.TestCase):
                        .replace("_", "-").replace(".", "-"))
             self.assertEqual(ledger.memory_dir_for_root(root),
                              Path.home() / ".claude/projects" / ("-" + project) / "memory")
+        # A root whose first component starts with a non-alphanumeric
+        # keeps every leading dash: "/.paperclip/repo" is
+        # "--paperclip-repo", not "-paperclip-repo". Stripping
+        # (lstrip("-")) resolves a directory Claude Code never wrote to
+        # and every repo stays partial.
+        self.assertEqual(
+            ledger.memory_dir_for_root(Path("/.paperclip/repo")),
+            Path.home() / ".claude/projects" / "--paperclip-repo" / "memory")
 
     def test_escape_ledger_runtime_state_is_git_ignored(self):
         checkout = Path(__file__).resolve().parents[2]

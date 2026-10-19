@@ -282,7 +282,7 @@ assert $? "no host-context workflow is staged (.github is excluded, so no host p
 hdr "Org ruleset template and rollout doc"
 
 if [[ -f "$STAGE/org-ruleset.json" ]]; then
-  python3 - "$STAGE/org-ruleset.json" <<'PY'
+  python3 - "$STAGE/org-ruleset.json" "$HERE/templates/org-github/sdlc-foundation/repo-exclude-list.txt" <<'PY'
 import json, sys
 from pathlib import Path
 doc = json.load(open(sys.argv[1]))
@@ -306,22 +306,48 @@ assert ctx == ["config-deploy / config-deploy"], \
 strict = [r.get("parameters", {}).get("strict_required_status_checks_policy")
           for r in doc.get("rules", []) if r.get("type") == "required_status_checks"]
 assert strict == [True], "required checks must be strict (branch up to date)"
-exclude_file = Path("templates/org-github/sdlc-foundation/repo-exclude-list.txt")
+exclude_file = Path(sys.argv[2])
 exclude_entries = [line.strip() for line in exclude_file.read_text().splitlines()
                    if line.strip() and not line.lstrip().startswith("#")]
 assert exclude_entries == ["replay-*", ".github"], \
     "canonical exclusion fixture changed; update the rendering contract"
-rendered_exclude = exclude_entries + ["paperclip-operator-toolkit"]
-rendered = dict(doc)
-rendered["conditions"] = dict(doc["conditions"])
-rendered["conditions"]["repository_name"] = dict(repo)
-rendered["conditions"]["repository_name"]["exclude"] = rendered_exclude
+PY
+  assert $? "org ruleset template requires exactly config-deploy / config-deploy on main, strictly, with only the baseline rule and repo exclusions" \
+    "a ruleset naming the bare config-deploy (or any non-existent check), adding merge_queue, or adding unrelated branch rules makes the rollout require checks nothing produces"
+
+  # The rollout doc's render snippet is the operator procedure: extract it
+  # from the doc, run it from the repo root, and assert its output.
+  # Rebuilding the expected list in-test is a tautology, and a
+  # cwd-relative exclude path reds the suite when run outside the root.
+  RENDER_SNIPPET="$(mktemp)"
+  # The fence sits inside a numbered list, so every line carries the
+  # 3-space list indent (markdown presentation, not procedure content):
+  # strip it so the heredoc terminator lands at column 0 as bash
+  # requires, exactly as an operator copy-pasting the block would.
+  awk '/^[[:space:]]*```bash[[:space:]]*$/{flag=1;next}/^[[:space:]]*```[[:space:]]*$/{if(flag)exit}flag' "$DOC" \
+    | sed 's/^   //' > "$RENDER_SNIPPET"
+  if [[ ! -s "$RENDER_SNIPPET" ]]; then
+    rm -f "$RENDER_SNIPPET"
+    assert 1 "the rollout doc render snippet produces the canonical exclusions plus the toolkit exclusion" \
+      "no bash snippet extracted from docs/config-deploy-checks.md -- the operator procedure has no pinned source"
+  elif ( cd "$HERE" && bash "$RENDER_SNIPPET" ); then
+    rm -f "$RENDER_SNIPPET"
+    python3 - <<'PY'
+import json
+rendered = json.load(open("/tmp/config-deploy-ruleset.json"))
 assert rendered["conditions"]["repository_name"]["exclude"] == \
     ["replay-*", ".github", "paperclip-operator-toolkit"], \
     "rendered ruleset must inject the canonical exclusions and toolkit exclusion"
 PY
-  assert $? "org ruleset template requires exactly config-deploy / config-deploy on main, strictly, with only the baseline rule and repo exclusions" \
-    "a ruleset naming the bare config-deploy (or any non-existent check), adding merge_queue, or adding unrelated branch rules makes the rollout require checks nothing produces"
+    render_status=$?
+    rm -f /tmp/config-deploy-ruleset.json
+    assert "$render_status" "the rollout doc render snippet produces the canonical exclusions plus the toolkit exclusion" \
+      "the operator procedure no longer renders the expected exclusions -- update the rendering contract"
+  else
+    rm -f "$RENDER_SNIPPET" /tmp/config-deploy-ruleset.json
+    assert 1 "the rollout doc render snippet produces the canonical exclusions plus the toolkit exclusion" \
+      "the rollout doc render snippet failed when run from the repo root"
+  fi
 else
   assert 1 "org ruleset template exists at templates/org-github/config-deploy/org-ruleset.json" \
     "absent -- the operator has no one-time org ruleset to apply"
