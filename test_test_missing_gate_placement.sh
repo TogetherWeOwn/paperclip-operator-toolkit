@@ -302,7 +302,7 @@ PY
   assert $? "the detect diff lists non-ASCII paths unquoted (core.quotePath=false)" \
     "a quoted octal path never matches .py so an untested non-ASCII src silently passes"
 
-  grep -q "startswith" "$STAGE/test-missing-gate.yml" && grep -q "unclassifiable quoted path" "$STAGE/test-missing-gate.yml"
+  grep -qF "f.startswith('\"')" "$STAGE/test-missing-gate.yml" && grep -q "unclassifiable quoted path" "$STAGE/test-missing-gate.yml"
   assert $? "the mode-aware gate fails closed on still-quoted paths (\" or \\ in the name)" \
     "core.quotePath=false covers only non-ASCII -- a quoted entry would otherwise silently pass; the guard lives in the gate (which knows the mode), never in detect (which has no mode and would red even warn-mode wrappers)"
 
@@ -347,7 +347,7 @@ PY
     assert $? "the adoption snippet sets pipefail" \
       "without pipefail an adopter git failure passes the gate"
 
-    grep -q "startswith" "$STAGE/ADOPTION.md"
+    grep -qF "f.startswith('\"')" "$STAGE/ADOPTION.md"
     assert $? "the adoption snippet routes still-quoted paths to the gate (relevant=true)" \
       "a copy-paste adopter with a quotePath-only diff regains the silent pass on \" or \\ names; adoption detect has no mode so it must stay green and let the mode-aware gate decide"
 

@@ -116,7 +116,11 @@ failed gate.
 ## Exemptions
 
 Add the `tests-exempt` label to waive the src-without-tests gate (docs-only
-changes pass without the label). The changed-line coverage and test-guard
+changes pass without the label). The waiver never covers unclassifiable
+quoted names: a path containing `"` or `\` stays quoted under
+`core.quotePath=false`, so the gate cannot tell code from docs and fails
+closed on it in enforcing mode even with the label (advisory in warn mode).
+The changed-line coverage and test-guard
 (vacuity) rules are implemented in the `blocker_test_checks.py` library for
 callers that supply coverage data and test contents; the reusable workflow
 v1 above runs only the src-without-tests rule.

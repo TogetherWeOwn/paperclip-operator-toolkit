@@ -407,6 +407,18 @@ class EmbeddedGateScriptTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("unclassifiable quoted path", out)
 
+    def test_quoted_path_not_waived_by_exempt_in_enforcing(self):
+        # Unclassifiable names fail closed even with the waiver: the gate
+        # cannot tell code from docs for a quoted entry, so neither the
+        # label nor the docs-only pass applies to it (ADOPTION.md
+        # Exemptions). Moving the quoted rule under the waiver must fail
+        # this test.
+        rc, out = self._run_gate_capture(
+            "pull_request", "enforcing", ['"docs/say \\"hi\\".md"'],
+            labels=["tests-exempt"])
+        self.assertEqual(rc, 1)
+        self.assertIn("unclassifiable quoted path", out)
+
 
 class DetectDiffFixtureTest(unittest.TestCase):
     """End-to-end pin for the detect step's git diff: the changed-file list

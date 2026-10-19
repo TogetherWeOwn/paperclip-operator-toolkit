@@ -496,8 +496,13 @@ def incident_lines(source, errors):
 
 
 def memory_dir_for_root(root):
-    project = re.sub(r"[^A-Za-z0-9]", "-", str(root.expanduser().resolve())).lstrip("-")
-    return Path.home() / ".claude/projects" / ("-" + project) / "memory"
+    # Claude Code derives the project slug by replacing every
+    # non-alphanumeric character with "-": the leading "/" becomes the
+    # first dash, and a first component starting with "." or "_" keeps
+    # its own dash ("/.x/repo" -> "--x-repo"). Never strip: dropping a
+    # dash resolves a directory Claude Code never wrote to.
+    project = re.sub(r"[^A-Za-z0-9]", "-", str(root.expanduser().resolve()))
+    return Path.home() / ".claude/projects" / project / "memory"
 
 
 def collect_incidents(paths, repositories, prs_by_repo, start, end):

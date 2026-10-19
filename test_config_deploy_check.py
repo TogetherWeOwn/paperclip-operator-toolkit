@@ -536,6 +536,84 @@ class RequiredCheckTest(unittest.TestCase):
             f"expected no REQUIRED_CHECK_* finding, got {got}",
         )
 
+    FLOW_TRIGGER_TREE = {
+        ".github/workflows/ci.yml": """\
+            name: CI
+            on:
+              push: { branches: [main] }
+              workflow_call:
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                timeout-minutes: 5
+                steps:
+                  - uses: actions/checkout@PIN
+            """,
+    }
+
+    def test_flow_valued_trigger_plus_workflow_call_produces_bare_context(self):
+        """Fails if a trigger with a same-line flow value is not counted:
+        `push: { branches: [main] }` plus `workflow_call:` is a dual
+        trigger, so requiring bare `test` must produce no
+        REQUIRED_CHECK_* finding (an end-anchored trigger regex reads
+        this as reusable-only and false-fails)."""
+        got = self._codes_with_required(["test"], self.FLOW_TRIGGER_TREE)
+        self.assertFalse(
+            [c for c in got if c.startswith("REQUIRED_CHECK")],
+            f"expected no REQUIRED_CHECK_* finding, got {got}",
+        )
+
+    FLOW_REUSABLE_ONLY_TREE = {
+        ".github/workflows/reusable.yml": """\
+            name: reusable
+            on:
+              workflow_call: {}
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                timeout-minutes: 5
+                steps:
+                  - uses: actions/checkout@PIN
+            """,
+    }
+
+    def test_flow_valued_workflow_call_alone_produces_no_bare_context(self):
+        """Fails if `workflow_call: {}` alone is not seen as reusable:
+        GitHub reports `caller / test` for it, so requiring bare `test`
+        must produce REQUIRED_CHECK_MISSING (an end-anchored trigger
+        regex misses the flow value and false-passes)."""
+        got = self._codes_with_required(
+            ["test"], self.FLOW_REUSABLE_ONLY_TREE)
+        self.assertIn("REQUIRED_CHECK_MISSING", got)
+
+    FOUR_SPACE_MATRIX_TREE = {
+        ".github/workflows/ci.yml": """\
+            name: CI
+            on: [push]
+            jobs:
+                test:
+                    runs-on: ubuntu-latest
+                    timeout-minutes: 5
+                    strategy:
+                        matrix:
+                            os: [ubuntu-latest]
+                    steps:
+                        - uses: actions/checkout@PIN
+            """,
+    }
+
+    def test_four_space_matrix_context_matches_produced_job_check(self):
+        """Fails if the matrix detector assumes 2-space nesting: this
+        4-space job has strategy.matrix, so GitHub reports
+        `test (ubuntu-latest)` and requiring it must produce no
+        REQUIRED_CHECK_* finding."""
+        got = self._codes_with_required(
+            ["test (ubuntu-latest)"], self.FOUR_SPACE_MATRIX_TREE)
+        self.assertFalse(
+            [c for c in got if c.startswith("REQUIRED_CHECK")],
+            f"expected no REQUIRED_CHECK_* finding, got {got}",
+        )
+
     MATRIX_TREE = {
         ".github/workflows/ci.yml": """\
             name: CI
