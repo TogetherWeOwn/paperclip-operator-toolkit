@@ -373,7 +373,7 @@ jobs:
     outputs:
       heavy: ${{ steps.detect.outputs.heavy }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: detect
@@ -495,7 +495,7 @@ jobs:
           "$PGBIN/createdb" -h 127.0.0.1 -p "$PGPORT" -U "$PGUSER" "$PGDATABASE"
           echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
           echo "ORGDB_PGDATA=$PGDATA" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Postgres client and jq
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
@@ -667,7 +667,7 @@ jobs:
           [[ "${RUNNER_ARCH:-}" == X64 ]]
           printf 'runner: name=%s os=%s arch=%s\n' "${RUNNER_NAME:-unknown}" "$RUNNER_OS" "$RUNNER_ARCH"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           clean: true
           # The static-label guard below compares complete workflow selectors
@@ -3612,13 +3612,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           clean: true
 
       # Migrations snapshot for the validate_sql base-schema proof. The fork
       # repo is public, so no credential is needed (and none is provided).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: TogetherWeOwn/paperclip
           ref: 742aa11d332611e8aff16bb9c87a21b527a1cab1
@@ -3685,7 +3685,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A suite that cannot fail is decoration. Each mutation step below
       # reintroduces a REAL past defect into a THROWAWAY COPY — never a tracked
@@ -4368,7 +4368,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # TOG-434. The rule: an action only a human can perform is a RUNBOOK
       # LINE; a judgement only the owner may make is a DECISION. Filed the
@@ -4467,7 +4467,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -4531,7 +4531,7 @@ jobs:
       run:
         working-directory: plugins/dispatch
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Node 24: the version the instance runs plugins on. `node --test`
       # semantics have moved between majors, so testing on another one would be
@@ -4677,7 +4677,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -5007,7 +5007,7 @@ jobs:
     outputs:
       impacted: ${{ steps.impact.outputs.impacted }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           clean: true
 
@@ -5057,7 +5057,7 @@ jobs:
       run:
         working-directory: plugins/model-selection
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           clean: true
 
@@ -5127,7 +5127,7 @@ jobs:
           esac
           echo "mutation gate: ok"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Node 24: the version the instance runs plugins on.
       - uses: actions/setup-node@v7
@@ -5185,7 +5185,7 @@ jobs:
       run:
         working-directory: plugins/cliproxy-insight
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Node 24: the version the instance runs plugins on.
       - uses: actions/setup-node@v7
@@ -5231,7 +5231,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Disclosure scan self-test
         run: bash scripts/test_disclosure_scan.sh
@@ -5260,7 +5260,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
