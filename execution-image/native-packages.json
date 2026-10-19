@@ -6,9 +6,13 @@
   "index_url": "https://snapshot.debian.org/archive/debian/20261007T000000Z/dists/trixie/main/binary-amd64/Packages.xz",
   "packages": {
     "binutils": "2.44-3",
+    "clang": "1:19.0-63",
+    "clang-19": "1:19.1.7-3+b1",
     "gcc": "4:14.2.0-1",
     "gcc-14": "14.2.0-19",
     "libc6-dev": "2.41-12+deb13u4",
+    "llvm": "1:19.0-63",
+    "llvm-19": "1:19.1.7-3+b1",
     "pkg-config": "1.8.1-4",
     "pkgconf": "1.8.1-4"
   },
