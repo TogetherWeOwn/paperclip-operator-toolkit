@@ -79,12 +79,17 @@ template for new repos). Verify the reported check context is
    with open("templates/org-github/config-deploy/org-ruleset.json") as f:
        ruleset = json.load(f)
    ruleset["conditions"]["repository_name"]["exclude"] = excludes
-   with open("/tmp/config-deploy-ruleset.json", "w") as f:
+   output_path = os.environ.get(
+       "CONFIG_DEPLOY_RULESET_OUTPUT", "/tmp/config-deploy-ruleset.json")
+   with open(output_path, "w") as f:
        json.dump(ruleset, f, indent=2)
        f.write("\n")
    PY
    ```
    Apply `/tmp/config-deploy-ruleset.json`, not the template as-is.
+   `CONFIG_DEPLOY_RULESET_OUTPUT` redirects the render when set (the
+   placement suite passes a private temp path); unset, the snippet
+   writes the default above.
 4. Host scripts must discover repos dynamically with one exclude list;
    no hardcoded repo lists.
 

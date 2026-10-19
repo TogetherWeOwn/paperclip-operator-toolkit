@@ -319,6 +319,10 @@ PY
   # from the doc, run it from the repo root, and assert its output.
   # Rebuilding the expected list in-test is a tautology, and a
   # cwd-relative exclude path reds the suite when run outside the root.
+  # The render must not touch the operator's documented default path:
+  # the snippet honors CONFIG_DEPLOY_RULESET_OUTPUT, so hand it a
+  # private temp path and clean up only that path on every branch.
+  RULESET_OUTPUT="$(mktemp)"
   RENDER_SNIPPET="$(mktemp)"
   # The fence sits inside a numbered list, so every line carries the
   # 3-space list indent (markdown presentation, not procedure content):
@@ -327,24 +331,24 @@ PY
   awk '/^[[:space:]]*```bash[[:space:]]*$/{flag=1;next}/^[[:space:]]*```[[:space:]]*$/{if(flag)exit}flag' "$DOC" \
     | sed 's/^   //' > "$RENDER_SNIPPET"
   if [[ ! -s "$RENDER_SNIPPET" ]]; then
-    rm -f "$RENDER_SNIPPET"
+    rm -f "$RENDER_SNIPPET" "$RULESET_OUTPUT"
     assert 1 "the rollout doc render snippet produces the canonical exclusions plus the toolkit exclusion" \
       "no bash snippet extracted from docs/config-deploy-checks.md -- the operator procedure has no pinned source"
-  elif ( cd "$HERE" && bash "$RENDER_SNIPPET" ); then
+  elif ( cd "$HERE" && CONFIG_DEPLOY_RULESET_OUTPUT="$RULESET_OUTPUT" bash "$RENDER_SNIPPET" ); then
     rm -f "$RENDER_SNIPPET"
-    python3 - <<'PY'
-import json
-rendered = json.load(open("/tmp/config-deploy-ruleset.json"))
+    CONFIG_DEPLOY_RULESET_OUTPUT="$RULESET_OUTPUT" python3 - <<'PY'
+import json, os
+rendered = json.load(open(os.environ["CONFIG_DEPLOY_RULESET_OUTPUT"]))
 assert rendered["conditions"]["repository_name"]["exclude"] == \
     ["replay-*", ".github", "paperclip-operator-toolkit"], \
     "rendered ruleset must inject the canonical exclusions and toolkit exclusion"
 PY
     render_status=$?
-    rm -f /tmp/config-deploy-ruleset.json
+    rm -f "$RULESET_OUTPUT"
     assert "$render_status" "the rollout doc render snippet produces the canonical exclusions plus the toolkit exclusion" \
       "the operator procedure no longer renders the expected exclusions -- update the rendering contract"
   else
-    rm -f "$RENDER_SNIPPET" /tmp/config-deploy-ruleset.json
+    rm -f "$RENDER_SNIPPET" "$RULESET_OUTPUT"
     assert 1 "the rollout doc render snippet produces the canonical exclusions plus the toolkit exclusion" \
       "the rollout doc render snippet failed when run from the repo root"
   fi
