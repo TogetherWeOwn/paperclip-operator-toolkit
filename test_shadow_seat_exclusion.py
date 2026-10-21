@@ -127,7 +127,11 @@ class BoardRetrierTest(unittest.TestCase):
         self.assertTrue(is_excluded_from_generic_recovery({"assigneeAgentId": SEAT_A}))
         self.assertTrue(is_excluded_from_generic_recovery({"assignee_agent_id": SEAT_B}))
         self.assertTrue(is_excluded_from_generic_recovery({"agentId": SEAT_A}))
+        self.assertTrue(is_excluded_from_generic_recovery({"agent_id": SEAT_A}))
+        self.assertTrue(is_excluded_from_generic_recovery({"agent_id": SEAT_B}))
         self.assertTrue(is_excluded_from_generic_recovery({"addresseeAgentId": SEAT_B}))
+        self.assertTrue(is_excluded_from_generic_recovery({"addressee_agent_id": SEAT_A}))
+        self.assertTrue(is_excluded_from_generic_recovery({"addressee_agent_id": SEAT_B}))
 
     def test_ordinary_row_stays_eligible(self):
         for project in (None, "proj-live"):
