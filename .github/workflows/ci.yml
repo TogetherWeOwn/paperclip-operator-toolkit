@@ -1177,6 +1177,13 @@ jobs:
       - name: config/deploy placement gate
         run: ./test_config_deploy_placement.sh
 
+      # Release-lag + DORA per deployed app: the detector fires on a lagging
+      # history and stays silent on a fresh one, all offline against fixtures
+      # under test/fixtures/release-lag/. The scheduled release-lag workflow
+      # owns the live reads; CI proves the verdicts, never the network.
+      - name: release-lag detector suite
+        run: python3 -m unittest -v test_release_lag.py test_release_lag_regressions.py
+
       - name: pr-hygiene fault-visibility suite
         run: python3 -m unittest -v test_pr_hygiene_fault_visibility.py
 

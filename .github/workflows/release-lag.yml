@@ -1,0 +1,74 @@
+name: release-lag
+
+# Daily deduped alerts; Monday trailing-window DORA digest. Unknown never
+# closes an alert. The digest runs even when the lag check or issue sync fails.
+# Rollback: disable this workflow. Existing alert issues remain open.
+# Public evidence only; default token manages issues only in this repository.
+
+on:
+  schedule:
+    - cron: '13 7 * * *'
+    - cron: '47 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+concurrency:
+  group: release-lag-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    name: monitor
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out detector
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # main 2026-10-19
+        with:
+          persist-credentials: false
+
+      - name: Lag check
+        id: check
+        run: |
+          set -euo pipefail
+          rc=0
+          python3 release_lag.py check \
+            --out "$RUNNER_TEMP/release-lag.json" \
+            --markdown "$RUNNER_TEMP/release-lag.md" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [[ -f "$RUNNER_TEMP/release-lag.md" ]]; then
+            cat "$RUNNER_TEMP/release-lag.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "CHECK_RC=$rc" >> "$GITHUB_ENV"
+
+      - name: Sync lag issues
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          [[ -f "$RUNNER_TEMP/release-lag.json" ]] || { echo "no measured verdict file"; exit 1; }
+          python3 release_lag.py sync --repo "$GH_REPO" --input "$RUNNER_TEMP/release-lag.json"
+
+      - name: Weekly DORA digest
+        if: ${{ !cancelled() && (github.event.schedule == '47 8 * * 1' || github.event_name == 'workflow_dispatch') }}
+        run: |
+          set -euo pipefail
+          rc=0
+          # Reuse the exact inventory/history snapshot: no second cross-repo crawl.
+          python3 release_lag.py dora --from-check "$RUNNER_TEMP/release-lag.json" \
+            --out "$RUNNER_TEMP/dora.json" > "$RUNNER_TEMP/dora.md" || rc=$?
+          [[ -s "$RUNNER_TEMP/dora.json" ]] || { echo "no DORA snapshot"; exit 1; }
+          cat "$RUNNER_TEMP/dora.md" >> "$GITHUB_STEP_SUMMARY"
+          python3 release_lag.py publish-digest --repo "$GH_REPO" --markdown "$RUNNER_TEMP/dora.md"
+          exit "$rc"
+
+      - name: Fail the run for alerts or incomplete measurement
+        if: ${{ !cancelled() }}
+        run: |
+          [[ "${CHECK_RC:-2}" == "0" ]] || { echo "release lag alert or unmeasured app (rc=${CHECK_RC:-2}); see summary"; exit 1; }

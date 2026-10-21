@@ -1,0 +1,28 @@
+{
+  "_comment": "Explicit contracts union public org repos advertising deploy-production for both lag and DORA. New apps inherit inventory coverage; until their job/SHA/serving-identity contracts are configured they report unknown, never healthy. prod_job/staging_job are full-match job-name regexes. Target SHA is the FIRST pinned checkout's executed git-log result, not the workflow head or subsequent tooling checkout. To exclude an app, add its full name to exclude.",
+  "org": "TogetherWeOwn",
+  "lag_hours": 24,
+  "stale_prod_days": 7,
+  "dora_window_days": 28,
+  "apps": [
+    {
+      "repo": "TogetherWeOwn/two-web-next",
+      "prod_workflow": "deploy-production",
+      "staging_workflow": "e2e-staging",
+      "staging_source": "web-e2e-title",
+      "prod_job": "deploy-production",
+      "prod_url": "https://togetherweown.com/up",
+      "prod_sha_path": "revision.commit"
+    },
+    {
+      "repo": "TogetherWeOwn/two-bot-next",
+      "prod_workflow": "deploy-production",
+      "staging_workflow": "deploy-staging",
+      "staging_job": "wrangler deploy \\+ intended rollout gate",
+      "prod_job": "wrangler .* \\+ readyz gate",
+      "prod_url": "https://two-bot-next-production.5150.workers.dev/readyz",
+      "prod_sha_path": "build_revision"
+    }
+  ],
+  "exclude": []
+}
