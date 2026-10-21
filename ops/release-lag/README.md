@@ -11,15 +11,22 @@ target. A successful workflow can also skip deployment entirely.
 
 For each configured app:
 
-1. Read complete, bounded workflow history and the actual deployment job.
+1. Read complete, bounded production history and the actual deployment job.
+   Staging pages newest-first successes and stops once the lag boundary is
+   decided, so high-volume staging histories cannot exhaust the fetch bound.
 2. Exclude skipped, cancelled and neutral jobs from deployment attempts.
+   Non-deployment run outcomes without a matching job keep their run-level
+   outcome instead of failing the whole app.
 3. In successful deployment jobs, resolve the **first** pinned target checkout:
    its `ref: <full SHA>` must match the executed `git log -1 --format=%H` result.
    Later tooling checkouts are not deployment targets.
 4. Use that same job's `completed_at` as **verified deployment completion**, not
    the workflow update time or the exact instant traffic switched.
-5. Require the latest resolved target to match the public serving-identity SHA.
-6. Resolve staging proof using the app-specific contract below.
+5. Require the latest resolved target to match the public serving-identity SHA,
+   fetched with an explicit `release-lag/1.0` User-Agent both apps accept.
+6. Resolve staging proof using the app-specific contract below, then walk
+   newest to oldest to find the **oldest** verified green ahead of production;
+   the lag clock starts there, not at the newest candidate.
 
 | App | Production job | Staging evidence |
 | --- | --- | --- |
@@ -37,8 +44,10 @@ unknown, including a public endpoint that rejects the monitor's HTTP client.
 
 ## Verdicts and delivery
 
-- **lagging:** staging's verified SHA is a descendant of production and has
-  waited more than 24 hours. Production ahead of staging is not lag.
+- **lagging:** the oldest undeployed staging-green descendant of production
+  has waited more than 24 hours. Production ahead of staging is not lag.
+  Reported lag hours are exact when the walk reaches a contained candidate
+  and a lower bound when it stops at the first old-enough one.
 - **stale-prod:** no successful actual production deployment in seven days.
   Green no-op workflow runs do not refresh this clock.
 - **ok:** measured equality, a candidate already contained in production, or a
@@ -57,10 +66,13 @@ inventory coverage in **both** reports. They need a job/target/serving-identity
 contract in `apps.json` before they can be measured; until then they appear as
 unknown rather than a false healthy row. `exclude` removes deliberate exceptions.
 
-Inventory lists paginate up to 20 pages of 100. Time-filtered run histories
-paginate up to 10 pages of 100; reaching a bound refuses the measurement rather
-than reporting partial numbers. Commands have 120-second timeouts and the job
-has a 20-minute timeout. No credential fallback or retries are performed.
+Inventory lists paginate up to 20 pages of 100. Time-filtered production
+histories paginate up to 10 pages of 100; reaching a bound refuses the
+measurement rather than reporting partial numbers. Staging uses the same
+10-page bound but pages server-filtered successes newest-first and stops at
+the lag boundary, so it normally reads one page. Commands have 120-second
+timeouts and the job has a 20-minute timeout. No credential fallback or
+retries are performed.
 
 ## DORA interpretation
 
@@ -90,7 +102,11 @@ actionlint .github/workflows/release-lag.yml
 ```
 
 The original fixture acceptance suite is unchanged. Additional implementer-owned
-regressions cover promotion targets/no-ops, ancestry, unknown alert preservation,
-pagination, discovery, non-change DORA conclusions, issue state dedupe, and digest
-creation. Isolated oldest-success and removed-equal-SHA-guard mutants must both
-turn the regressions red.
+regressions cover promotion targets/no-ops, ancestry, the oldest-waiting lag
+clock, lazy staging paging with early stop, the serving-identity User-Agent,
+non-deployment job outcomes, unknown alert preservation, pagination, discovery,
+non-change DORA conclusions, issue state dedupe, and digest creation. Isolated
+oldest-success and removed-equal-SHA-guard mutants must both turn the
+regressions red, as must ignoring the waiting boundary, reverting to the
+default HTTP client, raising on unmatched non-deployment runs, or dropping
+the staging success filter.

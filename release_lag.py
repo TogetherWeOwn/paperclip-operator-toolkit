@@ -4,7 +4,8 @@
 THE GAP THIS EXISTS FOR. Production once drifted 647 commits / 9 days behind
 the default branch and nobody noticed until asked. CI watches each repo's own
 main; nothing compares the commit actually serving production against the
-newest staging-green candidate, and nothing publishes deploy-health numbers.
+oldest staging-green candidate still waiting, and nothing publishes
+deploy-health numbers.
 This script is the measuring half. A scheduled workflow runs it; the workflow
 owns alerting (one deduped issue per app) and the weekly DORA post.
 
@@ -29,7 +30,9 @@ Skipped/cancelled/neutral jobs are excluded. Lead sample coverage is reported.
 Discovery unions public org repos with explicit inventory for BOTH reports.
 An inherited app needs an explicit job/SHA/serving-identity contract before it
 can be measured; an unknown contract is visible and red, NEVER silently ok.
-Inventory and time-window histories paginate, with bounds failing closed.
+Inventory and production histories paginate with bounds that fail closed;
+staging pages newest-first successes and stops once the lag boundary is
+decided, so high-volume staging histories cannot exhaust the fetch bound.
 
 Exit status: 0 all apps measured ok; 1 measured drift; 2 ANY unknown or discovery
 failure (measured drift still syncs its alert). A discovery outage does not stop
@@ -45,13 +48,17 @@ import re
 import subprocess
 import sys
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from datetime import datetime, timedelta, timezone
 
 DEFAULT_LAG_HOURS = 24
 DEFAULT_STALE_PROD_DAYS = 7
 DEFAULT_DORA_WINDOW_DAYS = 28
 PROD_WORKFLOW_BASENAME = "deploy-production"
+# Both apps' edges reject the default Python-urllib User-Agent with HTTP 403,
+# which would pin every app at unknown. Identify the monitor explicitly.
+IDENTITY_USER_AGENT = ("release-lag/1.0 "
+                       "(+https://github.com/TogetherWeOwn/paperclip-operator-toolkit)")
 
 
 # --------------------------------------------------------------------------
@@ -142,11 +149,16 @@ def latest(runs):
 # --------------------------------------------------------------------------
 
 def evaluate_app(prod_runs, staging_runs, now, lag_hours=DEFAULT_LAG_HOURS,
-                 stale_days=DEFAULT_STALE_PROD_DAYS, candidate_ahead="by-time"):
+                 stale_days=DEFAULT_STALE_PROD_DAYS, candidate_ahead="by-time",
+                 waiting_since=None, waiting_sha=None):
     """Score one app. Returns a verdict dict; alert=true means page the board.
 
     prod_runs / staging_runs are normalized run lists (possibly empty).
     `now` is an aware datetime. Thresholds come from apps.json.
+    waiting_since/waiting_sha describe the oldest verified staging-green
+    candidate ahead of production (collector-supplied); the lag clock starts
+    there, not at the newest candidate. A missing or unusable waiting_since
+    falls back to the newest candidate's verification time.
     """
     verdict = {
         "status": "unknown",
@@ -156,6 +168,7 @@ def evaluate_app(prod_runs, staging_runs, now, lag_hours=DEFAULT_LAG_HOURS,
         "prod_deployed_at": None,
         "staging_sha": None,
         "staging_green_at": None,
+        "waiting_since": None,
         "lag_hours": None,
         "reason": "no data",
     }
@@ -208,11 +221,23 @@ def evaluate_app(prod_runs, staging_runs, now, lag_hours=DEFAULT_LAG_HOURS,
     if not candidate_ahead:
         verdict["reason"] = "production contains or is ahead of the staging candidate"
         return verdict
-    if now - green_at > timedelta(hours=lag_hours):
-        lag = (now - green_at).total_seconds() / 3600.0
-        verdict.update(status="lagging", alert=True, lag_hours=round(lag, 1),
-                       reason="staging-green %s is %.1fh old, production still on %s"
-                       % (staging.get("sha")[:7], lag, prod.get("sha")[:7]))
+    # The lag clock starts at the oldest undeployed verified candidate: daily
+    # staging greens would otherwise keep the newest candidate forever young
+    # while production sits on an older commit.
+    wait_at = parse_ts(waiting_since) if waiting_since else None
+    if wait_at is None or wait_at > now or wait_at > green_at:
+        wait_at, waiting_sha = green_at, None
+    verdict["waiting_since"] = wait_at.isoformat()
+    if now - wait_at > timedelta(hours=lag_hours):
+        lag = (now - wait_at).total_seconds() / 3600.0
+        if waiting_sha:
+            reason = ("oldest undeployed staging-green %s is %.1fh old "
+                      "(newest %s), production still on %s"
+                      % (waiting_sha[:7], lag, staging.get("sha")[:7], prod.get("sha")[:7]))
+        else:
+            reason = ("staging-green %s is %.1fh old, production still on %s"
+                      % (staging.get("sha")[:7], lag, prod.get("sha")[:7]))
+        verdict.update(status="lagging", alert=True, lag_hours=round(lag, 1), reason=reason)
         return verdict
     verdict["reason"] = "newer staging-green candidate is within the lag threshold"
     return verdict
@@ -403,19 +428,50 @@ def workflow_id_for(repo, name):
     return None
 
 
-def fetch_runs(repo, workflow, since=None):
-    """Complete bounded time window, including successes hidden behind failures."""
+def resolve_workflow_id(repo, workflow):
+    """Numeric id for a configured workflow; raise when unmeasurable."""
     if not workflow:
         raise RuntimeError("no workflow measurement contract configured")
     wid = workflow_id_for(repo, workflow)
     if wid is None:
         raise RuntimeError("configured workflow %s is absent or disabled" % workflow)
+    return wid
+
+
+def fetch_runs(repo, workflow, since=None, max_pages=10):
+    """Complete bounded time window, including successes hidden behind failures."""
+    wid = resolve_workflow_id(repo, workflow)
     query = {"branch": "main"}
     if since is not None:
         query["created"] = ">=" + since.isoformat()
     raw = gh_api("repos/%s/actions/workflows/%s/runs?%s"
-                 % (repo, wid, urlencode(query)), max_pages=10)
+                 % (repo, wid, urlencode(query)), max_pages=max_pages)
     return [normalize_run(run) for run in raw]
+
+
+def iter_success_runs(repo, workflow, since=None, per_page=100, max_pages=10):
+    """Yield successful runs newest-first, one page at a time.
+
+    The runs API accepts conclusions in its `status` filter, so the server
+    (not the client) skips failures. Consumers stop paging once their verdict
+    is decided; exhausting max_pages with a full last page raises instead of
+    silently truncating, so an undecided walk reports unknown.
+    """
+    wid = resolve_workflow_id(repo, workflow)
+    query = {"branch": "main", "status": "success"}
+    if since is not None:
+        query["created"] = ">=" + since.isoformat()
+    base = "repos/%s/actions/workflows/%s/runs?%s" % (repo, wid, urlencode(query))
+    for page in range(1, max_pages + 1):
+        payload = gh_json("%s&per_page=%d&page=%d" % (base, per_page, page))
+        batch = payload.get("workflow_runs") if isinstance(payload, dict) else None
+        if not isinstance(batch, list):
+            raise RuntimeError("gh api %s returned an unexpected list shape" % base)
+        for raw in batch:
+            yield normalize_run(raw)
+        if len(batch) < per_page:
+            return
+    raise RuntimeError("gh api %s exceeds the %d-page measurement bound" % (base, max_pages))
 
 
 def checkout_sha(log):
@@ -458,6 +514,10 @@ def run_jobs(repo, run):
 def resolve_job_run(repo, run, pattern):
     jobs = [job for job in run_jobs(repo, run)
             if re.fullmatch(pattern, job.get("name", ""))]
+    if not jobs and run.get("conclusion") in ("startup_failure", "cancelled", "skipped", "neutral"):
+        # No job executed, so nothing was deployed; keep the run-level outcome
+        # instead of failing the whole app on one non-deployment run.
+        return dict(run, sha=None)
     if len(jobs) != 1:
         raise RuntimeError("deployment job contract missing or ambiguous in run %s" % run["number"])
     job = jobs[0]
@@ -477,33 +537,95 @@ def measure_production(app, runs):
     return [resolve_job_run(app["repo"], run, pattern) for run in completed(runs)]
 
 
+def verify_staging_candidate(app, run, is_first):
+    """Verify one successful run against the staging contract.
+
+    Returns the run with its resolved SHA, or None when the run proves no
+    green candidate (missing gates, non-success job). Raises only on contract
+    breaks: no staging contract, a retitled newest run, or a successful run
+    whose deployment job is missing or ambiguous.
+    """
+    if app.get("staging_source") == "web-e2e-title":
+        match = re.fullmatch(r"e2e-staging deploy ([0-9a-f]{40})", run["title"])
+        if not match:
+            if is_first:
+                raise RuntimeError("staging E2E title has no exercised SHA")
+            return None
+        jobs = run_jobs(app["repo"], run)
+        journeys = [j for j in jobs if j.get("name") == "staging-journeys"]
+        quality = [j for j in jobs if j.get("name") == "staging-quality / quality"]
+        steps = {s.get("name"): s.get("conclusion")
+                 for j in quality for s in j.get("steps", [])}
+        required = ("Lighthouse performance budgets (mobile, ci/lighthouserc.cjs)",
+                    "Lighthouse quality scores (desktop, categories vs ci/quality-budget.json)")
+        if (len(journeys) == len(quality) == 1
+                and all(j.get("conclusion") == "success" for j in journeys + quality)
+                and all(steps.get(name) == "success" for name in required)):
+            return dict(run, sha=match.group(1))
+        return None
+    if app.get("staging_job"):
+        measured = resolve_job_run(app["repo"], run, app["staging_job"])
+        return measured if measured["conclusion"] == "success" else None
+    raise RuntimeError("staging SHA measurement contract is not configured")
+
+
 def measure_staging(app, runs):
+    """Every verified green candidate, newest-first (offline over a list)."""
+    if not app.get("staging_source") and not app.get("staging_job"):
+        raise RuntimeError("staging SHA measurement contract is not configured")
     candidates = sorted((r for r in completed(runs) if r["conclusion"] == "success"),
                         key=lambda r: parse_ts(r.get("updated_at"))
                         or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-    for run in candidates:
-        if app.get("staging_source") == "web-e2e-title":
-            match = re.fullmatch(r"e2e-staging deploy ([0-9a-f]{40})", run["title"])
-            if not match:
-                raise RuntimeError("staging E2E title has no exercised SHA")
-            jobs = run_jobs(app["repo"], run)
-            journeys = [j for j in jobs if j.get("name") == "staging-journeys"]
-            quality = [j for j in jobs if j.get("name") == "staging-quality / quality"]
-            steps = {s.get("name"): s.get("conclusion")
-                     for j in quality for s in j.get("steps", [])}
-            required = ("Lighthouse performance budgets (mobile, ci/lighthouserc.cjs)",
-                        "Lighthouse quality scores (desktop, categories vs ci/quality-budget.json)")
-            if (len(journeys) == len(quality) == 1
-                    and all(j.get("conclusion") == "success" for j in journeys + quality)
-                    and all(steps.get(name) == "success" for name in required)):
-                return [dict(run, sha=match.group(1))]
-        elif app.get("staging_job"):
-            measured = resolve_job_run(app["repo"], run, app["staging_job"])
-            if measured["conclusion"] == "success":
-                return [measured]
-        else:
-            raise RuntimeError("staging SHA measurement contract is not configured")
-    return []
+    verified = []
+    for index, run in enumerate(candidates):
+        proven = verify_staging_candidate(app, run, index == 0)
+        if proven is not None:
+            verified.append(proven)
+    return verified
+
+
+def collect_staging(app, since, now, lag_hours, prod_sha):
+    """Lazy staging measurement: page successes newest-first and stop once the
+    lag boundary is decided. Returns (candidates, waiting_since, waiting_sha,
+    newest_ahead, unknown): candidates are verified newest-first, waiting_*
+    describe the oldest verified green ahead of production, newest_ahead is
+    the compare result for the newest candidate, and unknown is true when
+    ancestry cannot be read. A contained candidate ends the walk with an exact
+    boundary; a candidate older than the threshold ends it with lag proven
+    (reported hours are then a lower bound); an unreadable compare, a missing
+    contract, or an exhausted paging bound reports unknown, never ok.
+    """
+    if not app.get("staging_source") and not app.get("staging_job"):
+        raise RuntimeError("staging SHA measurement contract is not configured")
+    repo = app["repo"]
+    candidates, waiting, newest_ahead = [], None, None
+    compared = {}
+    examined = 0
+    for run in iter_success_runs(repo, app.get("staging_workflow"), since):
+        if run.get("status") != "completed" or run.get("conclusion") != "success":
+            continue
+        verified = verify_staging_candidate(app, run, examined == 0)
+        examined += 1
+        if verified is None:
+            continue
+        candidates.append(verified)
+        sha = verified.get("sha")
+        if (prod_sha, sha) not in compared:
+            compared[(prod_sha, sha)] = compare_ahead_by(repo, prod_sha, sha)
+        ahead = compared[(prod_sha, sha)]
+        if ahead is None:
+            return candidates, None, None, None, True
+        if len(candidates) == 1:
+            newest_ahead = ahead
+        if ahead == 0:
+            break
+        waiting = verified
+        green = parse_ts(verified.get("updated_at"))
+        if green is not None and now - green > timedelta(hours=lag_hours):
+            break
+    if waiting is None:
+        return candidates, None, None, newest_ahead, False
+    return candidates, waiting.get("updated_at"), waiting.get("sha"), newest_ahead, False
 
 
 def read_live_sha(app):
@@ -514,7 +636,8 @@ def read_live_sha(app):
     if not isinstance(path, str) or not path or any(not key for key in path.split(".")):
         raise RuntimeError("public production identity SHA path is not configured")
     try:
-        with urlopen(url, timeout=20) as response:
+        request = Request(url, headers={"User-Agent": IDENTITY_USER_AGENT})
+        with urlopen(request, timeout=20) as response:
             body = response.read(65537)
         if len(body) > 65536:
             raise ValueError("oversized response")
@@ -621,14 +744,21 @@ def collect(args, config, now, window):
             prod_runs = measure_production(app, fetch_runs(repo, app.get("prod_workflow"), since))
             add_merge_times(repo, prod_runs)
             dora[repo] = compute_dora(prod_runs, now, window)
-            staging_runs = measure_staging(app, fetch_runs(repo, app.get("staging_workflow"), since))
             prod = latest(successful(prod_runs))
-            staging = latest(successful(staging_runs))
-            if prod is not None and read_live_sha(app) != prod["sha"]:
-                raise RuntimeError("serving SHA differs from latest verified production target")
-            ahead = compare_ahead_by(repo, prod["sha"], staging["sha"]) if prod and staging else None
+            if prod is None:
+                # A stale verdict needs no staging evidence, and the serving
+                # check needs a verified target to compare against.
+                staging_runs, wait_iso, wait_sha, ahead = [], None, None, None
+            else:
+                if read_live_sha(app) != prod["sha"]:
+                    raise RuntimeError("serving SHA differs from latest verified production target")
+                staging_runs, wait_iso, wait_sha, ahead, walk_unknown = collect_staging(
+                    app, since, now, lag_hours, prod["sha"])
+                if walk_unknown:
+                    ahead = None
             verdict = evaluate_app(prod_runs, staging_runs, now, lag_hours, stale_days,
-                                   candidate_ahead=None if ahead is None else ahead > 0)
+                                   candidate_ahead=None if ahead is None else ahead > 0,
+                                   waiting_since=wait_iso, waiting_sha=wait_sha)
             # A successfully read empty production window proves staleness,
             # unlike a failed read (which reaches the exception path).
             if not prod_runs and not staging_runs:

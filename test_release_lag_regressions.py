@@ -7,6 +7,7 @@ suite. GitHub, public readiness, and issue writes are all replaced by fakes.
 import argparse
 import contextlib
 import io
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -48,6 +49,77 @@ class PromotionEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "HTTP 403"):
                 lag.read_live_sha(app)
         get.assert_called_once()
+
+    def test_identity_request_identifies_monitor_and_parses_nested_sha(self):
+        app = {"prod_url": "https://example.invalid/up", "prod_sha_path": "revision.commit"}
+        body = json.dumps({"revision": {"commit": A}}).encode()
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, limit=-1):
+                return body[:limit] if limit is not None and limit >= 0 else body
+
+        def fake_urlopen(request, timeout=20):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with patch.object(lag, "urlopen", side_effect=fake_urlopen):
+            self.assertEqual(lag.read_live_sha(app), A)
+        request = captured["request"]
+        self.assertEqual(request.full_url, app["prod_url"])
+        self.assertEqual(request.get_header("User-agent"), lag.IDENTITY_USER_AGENT)
+        self.assertNotIn("Python-urllib", request.get_header("User-agent"))
+
+    def test_malformed_identity_payload_is_unknown(self):
+        app = {"prod_url": "https://example.invalid/up", "prod_sha_path": "revision.commit"}
+        bodies = (b"not json", json.dumps({"revision": {}}).encode(),
+                  json.dumps({"revision": {"commit": "short"}}).encode(), b"x" * 70000)
+
+        class FakeResponse:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, limit=-1):
+                return self.body[:limit] if limit is not None and limit >= 0 else self.body
+
+        for body in bodies:
+            with self.subTest(body=body[:20]), \
+                    patch.object(lag, "urlopen", return_value=FakeResponse(body)):
+                with self.assertRaises(RuntimeError):
+                    lag.read_live_sha(app)
+
+    def test_non_deployment_run_without_job_keeps_its_outcome(self):
+        for conclusion in ("startup_failure", "cancelled", "skipped", "neutral"):
+            with self.subTest(conclusion=conclusion):
+                with patch.object(lag, "run_jobs", return_value=[]), \
+                        patch.object(lag, "gh_command") as gh:
+                    measured = lag.resolve_job_run(
+                        "Example/app", run(None, conclusion=conclusion), "deploy-production")
+            gh.assert_not_called()
+            self.assertIsNone(measured["sha"])
+            self.assertEqual(measured["conclusion"], conclusion)
+
+    def test_success_without_job_and_ambiguous_job_still_raise(self):
+        with patch.object(lag, "run_jobs", return_value=[]):
+            with self.assertRaises(RuntimeError):
+                lag.resolve_job_run("Example/app", run(None), "deploy-production")
+        jobs = [{"id": 1, "name": "ship"}, {"id": 2, "name": "ship"}]
+        with patch.object(lag, "run_jobs", return_value=jobs):
+            with self.assertRaises(RuntimeError):
+                lag.resolve_job_run("Example/app", run(None, conclusion="cancelled"), "ship")
 
     def test_workflow_head_is_never_a_deployed_target(self):
         raw = {"head_sha": C, "head_commit": {"timestamp": "2026-10-19T01:00:00Z"}}
@@ -137,6 +209,42 @@ class VerdictRegressionTests(unittest.TestCase):
         self.assertEqual(verdict["status"], "unknown")
         self.assertFalse(verdict["measured"])
 
+    def test_oldest_waiting_candidate_drives_lag_clock(self):
+        # Production freshly re-deployed an older target while B waited.
+        prod = [run(A, "2026-10-19T02:00:00Z")]
+        staging = [run(C, "2026-10-19T02:00:00Z", number=3),
+                   run(B, "2026-10-17T00:00:00Z", number=2)]
+        verdict = lag.evaluate_app(prod, staging, NOW, candidate_ahead=True,
+                                   waiting_since="2026-10-17T00:00:00Z", waiting_sha=B)
+        self.assertEqual(verdict["status"], "lagging")
+        self.assertTrue(verdict["alert"])
+        self.assertGreater(verdict["lag_hours"], 48)
+        self.assertIn(B[:7], verdict["reason"])
+        self.assertIn(C[:7], verdict["reason"])
+        self.assertEqual(lag.parse_ts(verdict["waiting_since"]),
+                         lag.parse_ts("2026-10-17T00:00:00Z"))
+
+    def test_daily_greens_alone_cannot_hide_a_stuck_production(self):
+        # Without the oldest-waiting clock the 1h-old newest candidate reads ok.
+        prod = [run(A, "2026-10-19T02:00:00Z")]
+        staging = [run(C, "2026-10-19T02:00:00Z", number=3)]
+        silent = lag.evaluate_app(prod, staging, NOW, candidate_ahead=True)
+        self.assertEqual(silent["status"], "ok")
+        firing = lag.evaluate_app(prod, staging, NOW, candidate_ahead=True,
+                                  waiting_since="2026-10-17T00:00:00Z", waiting_sha=B)
+        self.assertEqual(firing["status"], "lagging")
+
+    def test_unusable_waiting_since_falls_back_to_newest_candidate(self):
+        prod = [run(A, "2026-10-19T02:00:00Z")]
+        staging = [run(B, "2026-10-19T02:00:00Z")]
+        for bad in (None, "", "not-a-time", "2026-10-19T05:00:00Z",
+                    "2026-10-19T02:30:00Z"):
+            with self.subTest(waiting_since=bad):
+                verdict = lag.evaluate_app(prod, staging, NOW, candidate_ahead=True,
+                                           waiting_since=bad, waiting_sha=C)
+                self.assertEqual(verdict["status"], "ok")
+                self.assertFalse(verdict["alert"])
+
     def test_missing_staging_is_unknown_not_recovered(self):
         verdict = lag.evaluate_app([run(A)], [], NOW)
         self.assertEqual(verdict["status"], "unknown")
@@ -177,6 +285,164 @@ class DoraRegressionTests(unittest.TestCase):
 
     def test_unknown_discovered_app_is_visible_in_digest(self):
         self.assertIn("| Example/new | unknown | n/a", lag.render_dora_markdown({"Example/new": None}, 28))
+
+
+class StagingWalkTests(unittest.TestCase):
+    APP = {"repo": "Example/app", "staging_job": "ship"}
+
+    def collect(self, runs, shas, ahead_by):
+        def jobs(repo, item):
+            return [{"id": item["number"], "name": "ship", "status": "completed",
+                     "conclusion": "success", "completed_at": item["updated_at"]}]
+
+        def command(*args):
+            return checkout_log(shas[int(args[-1].split("/")[-2])])
+
+        def ahead(repo, base, head):
+            return ahead_by[head]
+
+        with patch.object(lag, "iter_success_runs", return_value=iter(runs)), \
+                patch.object(lag, "run_jobs", side_effect=jobs), \
+                patch.object(lag, "gh_command", side_effect=command), \
+                patch.object(lag, "compare_ahead_by", side_effect=ahead) as compare:
+            result = lag.collect_staging(self.APP, None, NOW, 24, A)
+        return result + (compare,)
+
+    def test_walk_stops_at_first_old_enough_ahead_candidate(self):
+        runs = [run(None, "2026-10-19T02:00:00Z", number=3),
+                run(None, "2026-10-17T00:00:00Z", number=2),
+                run(None, "2026-10-10T00:00:00Z", number=1)]
+        cands, wait_iso, wait_sha, newest_ahead, unknown, compare = self.collect(
+            runs, {3: C, 2: B, 1: A}, {C: 5, B: 3, A: 0})
+        self.assertEqual([c["sha"] for c in cands], [C, B])
+        self.assertEqual(wait_iso, "2026-10-17T00:00:00Z")
+        self.assertEqual(wait_sha, B)
+        self.assertEqual(newest_ahead, 5)
+        self.assertFalse(unknown)
+        self.assertEqual(compare.call_count, 2)
+
+    def test_walk_stops_at_contained_boundary_with_exact_hours(self):
+        runs = [run(None, "2026-10-19T02:00:00Z", number=3),
+                run(None, "2026-10-19T01:00:00Z", number=2),
+                run(None, "2026-10-10T00:00:00Z", number=1)]
+        cands, wait_iso, wait_sha, newest_ahead, unknown, compare = self.collect(
+            runs, {3: C, 2: B, 1: A}, {C: 5, B: 3, A: 0})
+        self.assertEqual(wait_iso, "2026-10-19T01:00:00Z")
+        self.assertEqual(wait_sha, B)
+        self.assertEqual(newest_ahead, 5)
+        self.assertFalse(unknown)
+        self.assertEqual(compare.call_count, 3)
+
+    def test_newest_contained_needs_one_compare(self):
+        runs = [run(None, "2026-10-19T02:00:00Z", number=3)]
+        cands, wait_iso, wait_sha, newest_ahead, unknown, compare = self.collect(
+            runs, {3: C}, {C: 0})
+        self.assertEqual(len(cands), 1)
+        self.assertIsNone(wait_iso)
+        self.assertIsNone(wait_sha)
+        self.assertEqual(newest_ahead, 0)
+        self.assertFalse(unknown)
+        self.assertEqual(compare.call_count, 1)
+
+    def test_unreadable_compare_is_unknown(self):
+        runs = [run(None, "2026-10-19T02:00:00Z", number=3)]
+        cands, wait_iso, wait_sha, newest_ahead, unknown, _ = self.collect(
+            runs, {3: C}, {C: None})
+        self.assertTrue(unknown)
+        self.assertIsNone(newest_ahead)
+
+    def test_duplicate_sha_compares_once(self):
+        runs = [run(None, "2026-10-19T02:00:00Z", number=3),
+                run(None, "2026-10-18T00:00:00Z", number=2)]
+        cands, wait_iso, wait_sha, newest_ahead, unknown, compare = self.collect(
+            runs, {3: B, 2: B}, {B: 4})
+        self.assertEqual(wait_iso, "2026-10-18T00:00:00Z")
+        self.assertEqual(wait_sha, B)
+        self.assertEqual(compare.call_count, 1)
+
+    def test_first_retitled_run_raises_later_retitled_skipped(self):
+        app = {"repo": "Example/app", "staging_source": "web-e2e-title"}
+        bad = dict(run(None, "2026-10-19T02:00:00Z", number=3), title="renamed workflow")
+        with patch.object(lag, "iter_success_runs", return_value=iter([bad])):
+            with self.assertRaisesRegex(RuntimeError, "exercised SHA"):
+                lag.collect_staging(app, None, NOW, 24, A)
+        good = dict(run(None, "2026-10-19T02:00:00Z", number=4),
+                    title="e2e-staging deploy " + B)
+        steps = [{"name": name, "conclusion": "success"} for name in (
+            "Lighthouse performance budgets (mobile, ci/lighthouserc.cjs)",
+            "Lighthouse quality scores (desktop, categories vs ci/quality-budget.json)")]
+        jobs = [{"name": "staging-journeys", "conclusion": "success"},
+                {"name": "staging-quality / quality", "conclusion": "success", "steps": steps}]
+        with patch.object(lag, "iter_success_runs", return_value=iter([good, bad])), \
+                patch.object(lag, "run_jobs", return_value=jobs) as run_jobs, \
+                patch.object(lag, "compare_ahead_by", return_value=2):
+            cands, wait_iso, wait_sha, newest_ahead, unknown = lag.collect_staging(
+                app, None, NOW, 24, A)
+        run_jobs.assert_called_once()
+        self.assertEqual([c["sha"] for c in cands], [B])
+        self.assertEqual(wait_sha, B)
+        self.assertFalse(unknown)
+
+
+class StagingPagerTests(unittest.TestCase):
+    APP = {"repo": "Example/app", "staging_workflow": "stage", "staging_job": "ship"}
+
+    def raw_run(self, number, at="2026-10-19T02:00:00Z"):
+        return {"id": number, "status": "completed", "conclusion": "success",
+                "created_at": at, "updated_at": at, "run_attempt": 1,
+                "display_title": "deploy-staging", "html_url": "https://example.invalid"}
+
+    def test_pager_filters_success_newest_first_and_stops_early(self):
+        page = [self.raw_run(number) for number in range(300, 200, -1)]
+        with patch.object(lag, "workflow_id_for", return_value=7), \
+                patch.object(lag, "gh_json",
+                             return_value={"workflow_runs": page, "total_count": 5000}) as get, \
+                patch.object(lag, "run_jobs", side_effect=lambda repo, item: [{
+                    "id": item["number"], "name": "ship", "status": "completed",
+                    "conclusion": "success", "completed_at": item["updated_at"]}]), \
+                patch.object(lag, "gh_command", return_value=checkout_log(C)), \
+                patch.object(lag, "compare_ahead_by", return_value=0):
+            cands, _, _, newest_ahead, unknown = lag.collect_staging(
+                self.APP, lag.parse_ts("2026-09-20T03:00:00Z"), NOW, 24, A)
+        # A full first page with thousands behind it: the contained newest
+        # decides the walk, so page two is never fetched.
+        get.assert_called_once()
+        url = get.call_args.args[0]
+        self.assertIn("status=success", url)
+        self.assertIn("branch=main", url)
+        self.assertIn("created=", url)
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(newest_ahead, 0)
+        self.assertFalse(unknown)
+
+    def test_pager_bound_refuses_an_undecided_prefix(self):
+        page = [self.raw_run(number) for number in range(100, 0, -1)]
+        with patch.object(lag, "workflow_id_for", return_value=7), \
+                patch.object(lag, "gh_json",
+                             return_value={"workflow_runs": page}) as get, \
+                patch.object(lag, "run_jobs", side_effect=lambda repo, item: [{
+                    "id": item["number"], "name": "ship", "status": "completed",
+                    "conclusion": "success", "completed_at": item["updated_at"]}]), \
+                patch.object(lag, "gh_command", return_value=checkout_log(C)), \
+                patch.object(lag, "compare_ahead_by", return_value=5):
+            with self.assertRaisesRegex(RuntimeError, "measurement bound"):
+                lag.collect_staging(self.APP, None, NOW, 24, A)
+        self.assertEqual(get.call_count, 10)
+
+    def test_pager_rejects_unexpected_shape(self):
+        with patch.object(lag, "workflow_id_for", return_value=7):
+            for payload in ({"repositories": []}, "junk"):
+                with self.subTest(payload=payload), \
+                        patch.object(lag, "gh_json", return_value=payload):
+                    with self.assertRaisesRegex(RuntimeError, "unexpected list shape"):
+                        list(lag.iter_success_runs("Example/app", "stage"))
+
+    def test_pager_requires_a_resolvable_workflow(self):
+        with self.assertRaisesRegex(RuntimeError, "no workflow measurement contract"):
+            list(lag.iter_success_runs("Example/app", None))
+        with patch.object(lag, "workflow_id_for", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "absent or disabled"):
+                list(lag.iter_success_runs("Example/app", "renamed"))
 
 
 class FetchAndDiscoveryTests(unittest.TestCase):
@@ -239,11 +505,12 @@ class CollectionTests(unittest.TestCase):
                      "conclusion": "skipped" if item["number"] == 2 else "success",
                      "completed_at": item["updated_at"]}]
         def fetch(repo, workflow, since):
-            return stage if workflow == "stage" else prod
+            return prod
         def command(*args):
             return checkout_log(B if args[-1].endswith("/3/logs") else A)
         with patch.object(lag, "configured_apps", return_value=([app, discovered], [])), \
                 patch.object(lag, "fetch_runs", side_effect=fetch), \
+                patch.object(lag, "iter_success_runs", return_value=iter(stage)), \
                 patch.object(lag, "run_jobs", side_effect=jobs), \
                 patch.object(lag, "gh_command", side_effect=command), \
                 patch.object(lag, "read_live_sha", return_value=A), \
@@ -254,6 +521,8 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(verdict["status"], "lagging")
         self.assertEqual(verdict["prod_sha"], A)
         self.assertEqual(verdict["prod_deployed_at"], prod[0]["updated_at"])
+        self.assertEqual(lag.parse_ts(verdict["waiting_since"]),
+                         lag.parse_ts(stage[0]["updated_at"]))
         self.assertEqual(payload["dora"]["Example/app"]["deploys"], 1)
         self.assertIsNone(payload["dora"]["Example/new"])
         self.assertEqual(payload["results"]["Example/new"]["status"], "unknown")
