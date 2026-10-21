@@ -20,6 +20,8 @@ staging uses its target checkout, including pinned workflow dispatches.
 Lag requires a staging-green descendant of production waiting >24h. An old
 candidate already contained in production is not lag. Stale production means
 no successful actual deployment in 7d. Unknown evidence never closes an alert.
+As-of semantics: runs completing after the check clock are not-yet-completed,
+not unknown, so one mid-check completion cannot poison a decided verdict.
 
 DORA (trailing 28d): actual deployment-job successes/week; median resolved-target
 PR merge -> job completion (n/a without merge evidence); failed deployment-job
@@ -145,6 +147,24 @@ def latest(runs):
     return ordered[-1] if ordered else None
 
 
+def asof_runs(runs, now):
+    """Runs completed as of the check clock; future completions are excluded.
+
+    A run whose verified completion lands after `now` finished mid-check (the
+    clock was captured before its history fetch). It is treated as
+    not-yet-completed, not as an unknown measurement, so one mid-check
+    completion cannot poison an otherwise decided verdict. Runs with
+    unreadable stamps are kept for the fail-closed paths below.
+    """
+    kept = []
+    for run in runs:
+        moment = parse_ts(run.get("updated_at"))
+        if moment is not None and moment > now:
+            continue
+        kept.append(run)
+    return kept
+
+
 # --------------------------------------------------------------------------
 # lag verdict (pure)
 # --------------------------------------------------------------------------
@@ -159,8 +179,12 @@ def evaluate_app(prod_runs, staging_runs, now, lag_hours=DEFAULT_LAG_HOURS,
     waiting_since/waiting_sha describe the oldest verified staging-green
     candidate ahead of production (collector-supplied); the lag clock starts
     there, not at the newest candidate. A missing or unusable waiting_since
-    falls back to the newest candidate's verification time.
+    falls back to the newest candidate's verification time. Runs completing
+    after `now` are excluded as not-yet-completed (as-of semantics); only
+    genuinely unreadable stamps stay fail-closed unknown.
     """
+    prod_runs = asof_runs(prod_runs, now)
+    staging_runs = asof_runs(staging_runs, now)
     verdict = {
         "status": "unknown",
         "alert": False,
@@ -194,6 +218,8 @@ def evaluate_app(prod_runs, staging_runs, now, lag_hours=DEFAULT_LAG_HOURS,
         return verdict
 
     deployed_at = parse_ts(verdict["prod_deployed_at"])
+    # As-of filtering above already excluded future completions; the > now
+    # arm stays as defense-in-depth so a clock race still fails closed.
     if prod is not None and (deployed_at is None or deployed_at > now):
         verdict.update(measured=False, reason="invalid production deployment timestamp")
         return verdict
@@ -203,6 +229,8 @@ def evaluate_app(prod_runs, staging_runs, now, lag_hours=DEFAULT_LAG_HOURS,
         return verdict
 
     green_at = parse_ts(verdict["staging_green_at"])
+    # Future greens were excluded as not-yet-completed; only a missing or
+    # unreadable as-of candidate stays unknown here.
     if staging is None or green_at is None or green_at > now:
         verdict.update(measured=False, reason="no measured staging-green candidate")
         return verdict
@@ -260,6 +288,7 @@ def compute_dora(prod_runs, now, window_days=DEFAULT_DORA_WINDOW_DAYS):
     change-fail rate  = failed deployment attempts / all deployment attempts.
     time to restore   = median(failed attempt -> next successful deployment).
     Explicit legacy head_ts fixtures retain their commit -> start proxy.
+    Post-now completions are outside the window (as-of, not failures).
     """
     since = now - timedelta(days=window_days)
     attempts = {"success", "failure", "timed_out", "startup_failure"}
@@ -602,6 +631,8 @@ def collect_staging(app, since, now, lag_hours, prod_sha):
     older than the threshold ends the walk with lag proven (reported
     hours are then a lower bound); an unreadable compare, a missing
     contract, or an exhausted paging bound reports unknown, never ok.
+    Runs completing after `now` are skipped as not-yet-completed, so a
+    mid-check completion never moves the boundary or the newest compare.
     """
     if not app.get("staging_source") and not app.get("staging_job"):
         raise RuntimeError("staging SHA measurement contract is not configured")
@@ -612,9 +643,15 @@ def collect_staging(app, since, now, lag_hours, prod_sha):
     for run in iter_success_runs(repo, app.get("staging_workflow"), since):
         if run.get("status") != "completed" or run.get("conclusion") != "success":
             continue
+        raw_at = parse_ts(run.get("updated_at"))
+        if raw_at is not None and raw_at > now:
+            continue
         verified = verify_staging_candidate(app, run, examined == 0)
         examined += 1
         if verified is None:
+            continue
+        green_at = parse_ts(verified.get("updated_at"))
+        if green_at is not None and green_at > now:
             continue
         candidates.append(verified)
         sha = verified.get("sha")
@@ -755,7 +792,8 @@ def collect(args, config, now, window):
         verdict["key"] = dedupe_key(repo)
         results[repo], dora[repo] = verdict, None
         try:
-            prod_runs = measure_production(app, fetch_runs(repo, app.get("prod_workflow"), since))
+            prod_runs = asof_runs(
+                measure_production(app, fetch_runs(repo, app.get("prod_workflow"), since)), now)
             add_merge_times(repo, prod_runs)
             dora[repo] = compute_dora(prod_runs, now, window)
             prod = latest(successful(prod_runs))
@@ -778,7 +816,7 @@ def collect(args, config, now, window):
             verdict = evaluate_app(prod_runs, staging_runs, now, lag_hours, stale_days,
                                    candidate_ahead=candidate_ahead,
                                    waiting_since=wait_iso, waiting_sha=wait_sha)
-            # A successfully read empty production window proves staleness,
+            # A successfully read empty as-of window proves staleness,
             # unlike a failed read (which reaches the exception path).
             if not prod_runs and not staging_runs:
                 verdict.update(status="stale-prod", measured=True, alert=True,

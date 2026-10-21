@@ -277,6 +277,72 @@ class VerdictRegressionTests(unittest.TestCase):
             self.assertEqual(lag.compare_ahead_by("Example/app", A, B), 5)
 
 
+class AsOfMidCheckTests(unittest.TestCase):
+    """Runs completing after the check clock are not-yet-completed, not unknown.
+
+    Live shape 2026-10-21: an e2e-staging success completed ~1 min after the
+    check clock, its staging_green_at exceeded now, and the app went unknown
+    (exit 2) for one run before self-healing. As-of filtering keeps the
+    verdict decided on the newest completed-as-of run instead.
+    """
+    FUTURE = "2026-10-19T03:01:00Z"
+
+    def test_midcheck_staging_completion_stays_decided_ok(self):
+        prod = [run(A, "2026-10-19T02:00:00Z")]
+        staging = [run(B, self.FUTURE, number=3),
+                   run(A, "2026-10-19T02:00:00Z", number=2)]
+        verdict = lag.evaluate_app(prod, staging, NOW, candidate_ahead=False)
+        self.assertTrue(verdict["measured"])
+        self.assertEqual(verdict["status"], "ok")
+        self.assertEqual(verdict["staging_sha"], A)
+        self.assertEqual(verdict["staging_green_at"], "2026-10-19T02:00:00Z")
+
+    def test_midcheck_prod_completion_stays_decided_ok(self):
+        prod = [run(B, self.FUTURE, number=2),
+                run(A, "2026-10-19T02:00:00Z")]
+        staging = [run(A, "2026-10-19T02:00:00Z")]
+        verdict = lag.evaluate_app(prod, staging, NOW, candidate_ahead=False)
+        self.assertTrue(verdict["measured"])
+        self.assertEqual(verdict["status"], "ok")
+        self.assertEqual(verdict["prod_sha"], A)
+        self.assertEqual(verdict["prod_deployed_at"], "2026-10-19T02:00:00Z")
+
+    def test_midcheck_completion_does_not_hide_a_lagging_waiter(self):
+        prod = [run(A, "2026-10-19T02:00:00Z")]
+        staging = [run(C, self.FUTURE, number=4),
+                   run(C, "2026-10-19T02:00:00Z", number=3),
+                   run(B, "2026-10-17T00:00:00Z", number=2)]
+        verdict = lag.evaluate_app(prod, staging, NOW, candidate_ahead=True,
+                                   waiting_since="2026-10-17T00:00:00Z", waiting_sha=B)
+        self.assertEqual(verdict["status"], "lagging")
+        self.assertTrue(verdict["alert"])
+        self.assertEqual(verdict["staging_sha"], C)
+        self.assertEqual(lag.parse_ts(verdict["waiting_since"]),
+                         lag.parse_ts("2026-10-17T00:00:00Z"))
+
+    def test_future_unresolved_prod_success_is_not_yet_a_target(self):
+        prod = [dict(run(None, self.FUTURE, number=2)),
+                run(A, "2026-10-19T02:00:00Z")]
+        staging = [run(A, "2026-10-19T02:00:00Z")]
+        verdict = lag.evaluate_app(prod, staging, NOW, candidate_ahead=False)
+        self.assertTrue(verdict["measured"])
+        self.assertEqual(verdict["status"], "ok")
+        self.assertEqual(verdict["prod_sha"], A)
+
+    def test_unreadable_stamps_stay_fail_closed_unknown(self):
+        prod = [run(A, "2026-10-19T02:00:00Z")]
+        bad_staging = [dict(run(B, "2026-10-19T02:00:00Z"), updated_at="not-a-time")]
+        verdict = lag.evaluate_app(prod, bad_staging, NOW, candidate_ahead=True)
+        self.assertEqual(verdict["status"], "unknown")
+        self.assertFalse(verdict["measured"])
+        self.assertEqual(verdict["reason"], "no measured staging-green candidate")
+        bad_prod = [dict(run(A), updated_at="bad")]
+        verdict = lag.evaluate_app(bad_prod, [run(A)], NOW)
+        self.assertEqual(verdict["status"], "unknown")
+        self.assertFalse(verdict["measured"])
+        self.assertEqual(verdict["reason"], "invalid production deployment timestamp")
+
+
 class DoraRegressionTests(unittest.TestCase):
     def test_skipped_cancelled_neutral_are_not_failures_or_incidents(self):
         successes = [run(A), run(B, "2026-10-18T00:00:00Z")]
@@ -299,6 +365,13 @@ class DoraRegressionTests(unittest.TestCase):
 
     def test_unknown_discovered_app_is_visible_in_digest(self):
         self.assertIn("| Example/new | unknown | n/a", lag.render_dora_markdown({"Example/new": None}, 28))
+
+    def test_midcheck_completion_is_outside_the_window_not_a_deploy(self):
+        asof = run(A, "2026-10-19T02:00:00Z")
+        future = run(B, "2026-10-19T03:01:00Z", number=2)
+        got = lag.compute_dora([asof, future], NOW)
+        self.assertEqual(got["deploys"], 1)
+        self.assertEqual(got["completed"], 1)
 
 
 class StagingWalkTests(unittest.TestCase):
@@ -389,6 +462,19 @@ class StagingWalkTests(unittest.TestCase):
         self.assertEqual(wait_iso, "2026-10-18T00:00:00Z")
         self.assertEqual(wait_sha, B)
         self.assertEqual(compare.call_count, 1)
+
+    def test_midcheck_completion_is_skipped_not_compared(self):
+        runs = [run(None, "2026-10-19T03:01:00Z", number=4),
+                run(None, "2026-10-19T02:00:00Z", number=3),
+                run(None, "2026-10-19T01:00:00Z", number=2)]
+        cands, wait_iso, wait_sha, newest_ahead, unknown, compare = self.collect(
+            runs, {4: C, 3: B, 2: A}, {C: 5, B: 3, A: 0})
+        self.assertEqual([c["sha"] for c in cands], [B, A])
+        self.assertEqual(wait_iso, "2026-10-19T02:00:00Z")
+        self.assertEqual(wait_sha, B)
+        self.assertEqual(newest_ahead, 3)
+        self.assertFalse(unknown)
+        self.assertEqual(compare.call_count, 2)
 
     def test_first_retitled_run_raises_later_retitled_skipped(self):
         app = {"repo": "Example/app", "staging_source": "web-e2e-title"}
@@ -619,6 +705,38 @@ class CollectionTests(unittest.TestCase):
                          lag.parse_ts("2026-10-17T00:00:00Z"))
         self.assertEqual(verdict["commits_behind"], 4)
         self.assertEqual(lag.check_exit(payload), 1)
+
+    def test_midcheck_completions_on_both_sides_stay_decided_ok(self):
+        app = {"repo": "Example/app", "prod_workflow": "prod", "prod_job": "ship",
+               "staging_workflow": "stage", "staging_job": "stage"}
+        prod = [run(None, "2026-10-19T03:01:00Z", number=2),
+                run(None, "2026-10-19T02:00:00Z", number=1)]
+        stage = [run(None, "2026-10-19T03:01:00Z", number=4),
+                 run(None, "2026-10-19T02:00:00Z", number=3)]
+        shas = {1: A, 2: B, 3: A, 4: C}
+        def jobs(repo, item):
+            name = "stage" if item["number"] in (3, 4) else "ship"
+            return [{"id": item["number"], "name": name, "status": "completed",
+                     "conclusion": "success", "completed_at": item["updated_at"]}]
+        def command(*args):
+            return checkout_log(shas[int(args[-1].split("/")[-2])])
+        with patch.object(lag, "configured_apps", return_value=([app], [])), \
+                patch.object(lag, "fetch_runs", return_value=prod), \
+                patch.object(lag, "iter_success_runs", return_value=iter(stage)), \
+                patch.object(lag, "run_jobs", side_effect=jobs), \
+                patch.object(lag, "gh_command", side_effect=command), \
+                patch.object(lag, "read_live_sha", return_value=A), \
+                patch.object(lag, "compare_ahead_by", return_value=0) as compare, \
+                patch.object(lag, "add_merge_times"), contextlib.redirect_stderr(io.StringIO()):
+            payload = lag.collect(argparse.Namespace(), {}, NOW, 28)
+        verdict = payload["results"]["Example/app"]
+        self.assertTrue(verdict["measured"])
+        self.assertEqual(verdict["status"], "ok")
+        self.assertEqual(verdict["prod_sha"], A)
+        self.assertEqual(verdict["staging_sha"], A)
+        self.assertEqual(payload["dora"]["Example/app"]["deploys"], 1)
+        self.assertEqual(compare.call_count, 1)
+        self.assertEqual(lag.check_exit(payload), 0)
 
     def test_serving_identity_mismatch_cannot_close_an_alert(self):
         app = {"repo": "Example/app", "prod_workflow": "prod", "staging_workflow": "stage",
