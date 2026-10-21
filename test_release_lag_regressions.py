@@ -19,10 +19,12 @@ NOW = lag.parse_ts("2026-10-19T03:00:00Z")
 A, B, C = (letter * 40 for letter in "abc")
 
 
-def run(sha=A, at="2026-10-17T00:00:00Z", conclusion="success", number=1):
+def run(sha=A, at="2026-10-17T00:00:00Z", conclusion="success", number=1,
+        event="push"):
     return {"sha": sha, "created_at": at, "updated_at": at,
             "status": "completed", "conclusion": conclusion,
-            "number": number, "attempt": 1, "title": "deploy-production"}
+            "number": number, "attempt": 1, "event": event,
+            "title": "deploy-production"}
 
 
 def checkout_log(sha):
@@ -197,6 +199,18 @@ class VerdictRegressionTests(unittest.TestCase):
         self.assertEqual(verdict["status"], "ok")
         self.assertFalse(verdict["alert"])
 
+    def test_found_waiting_overrides_newest_equality(self):
+        # Newest re-verifies the production SHA, but B still waits ahead.
+        prod = [run(A, "2026-10-19T02:00:00Z")]
+        staging = [run(A, "2026-10-19T02:00:00Z", number=3),
+                   run(B, "2026-10-17T00:00:00Z", number=2)]
+        verdict = lag.evaluate_app(prod, staging, NOW, candidate_ahead=True,
+                                   waiting_since="2026-10-17T00:00:00Z", waiting_sha=B)
+        self.assertEqual(verdict["status"], "lagging")
+        self.assertTrue(verdict["alert"])
+        self.assertIn(B[:7], verdict["reason"])
+        self.assertIn(A[:7], verdict["reason"])
+
     def test_production_ahead_of_old_candidate_is_not_lagging(self):
         verdict = lag.evaluate_app([run(B, "2026-10-19T01:00:00Z")], [run(A)], NOW,
                                    candidate_ahead=False)
@@ -327,11 +341,27 @@ class StagingWalkTests(unittest.TestCase):
                 run(None, "2026-10-10T00:00:00Z", number=1)]
         cands, wait_iso, wait_sha, newest_ahead, unknown, compare = self.collect(
             runs, {3: C, 2: B, 1: A}, {C: 5, B: 3, A: 0})
+        self.assertEqual([c["sha"] for c in cands], [C, B, A])
         self.assertEqual(wait_iso, "2026-10-19T01:00:00Z")
         self.assertEqual(wait_sha, B)
         self.assertEqual(newest_ahead, 5)
         self.assertFalse(unknown)
         self.assertEqual(compare.call_count, 3)
+
+    def test_contained_dispatch_does_not_hide_older_waiting_candidate(self):
+        # A pinned dispatch re-verifies the production SHA after B waited;
+        # dispatches are evidence but never the walk boundary.
+        runs = [run(None, "2026-10-19T02:00:00Z", number=3,
+                    event="workflow_dispatch"),
+                run(None, "2026-10-17T00:00:00Z", number=2)]
+        cands, wait_iso, wait_sha, newest_ahead, unknown, compare = self.collect(
+            runs, {3: A, 2: B}, {A: 0, B: 4})
+        self.assertEqual([c["sha"] for c in cands], [A, B])
+        self.assertEqual(wait_iso, "2026-10-17T00:00:00Z")
+        self.assertEqual(wait_sha, B)
+        self.assertEqual(newest_ahead, 0)
+        self.assertFalse(unknown)
+        self.assertEqual(compare.call_count, 2)
 
     def test_newest_contained_needs_one_compare(self):
         runs = [run(None, "2026-10-19T02:00:00Z", number=3)]
@@ -387,10 +417,11 @@ class StagingWalkTests(unittest.TestCase):
 class StagingPagerTests(unittest.TestCase):
     APP = {"repo": "Example/app", "staging_workflow": "stage", "staging_job": "ship"}
 
-    def raw_run(self, number, at="2026-10-19T02:00:00Z"):
+    def raw_run(self, number, at="2026-10-19T02:00:00Z", event="push"):
         return {"id": number, "status": "completed", "conclusion": "success",
                 "created_at": at, "updated_at": at, "run_attempt": 1,
-                "display_title": "deploy-staging", "html_url": "https://example.invalid"}
+                "event": event, "display_title": "deploy-staging",
+                "html_url": "https://example.invalid"}
 
     def test_pager_filters_success_newest_first_and_stops_early(self):
         page = [self.raw_run(number) for number in range(300, 200, -1)]
@@ -414,6 +445,33 @@ class StagingPagerTests(unittest.TestCase):
         self.assertEqual(len(cands), 1)
         self.assertEqual(newest_ahead, 0)
         self.assertFalse(unknown)
+
+    def test_walk_scans_past_contained_dispatches_to_push_boundary(self):
+        dispatches = [self.raw_run(number, event="workflow_dispatch")
+                      for number in range(300, 200, -1)]
+        boundary = [self.raw_run(200)]
+        def command(*args):
+            return checkout_log(A if args[-1].split("/")[-2] == "200" else C)
+        with patch.object(lag, "workflow_id_for", return_value=7), \
+                patch.object(lag, "gh_json", side_effect=[
+                    {"workflow_runs": dispatches},
+                    {"workflow_runs": boundary}]) as get, \
+                patch.object(lag, "run_jobs", side_effect=lambda repo, item: [{
+                    "id": item["number"], "name": "ship", "status": "completed",
+                    "conclusion": "success", "completed_at": item["updated_at"]}]), \
+                patch.object(lag, "gh_command", side_effect=command), \
+                patch.object(lag, "compare_ahead_by", return_value=0) as compare:
+            cands, wait_iso, wait_sha, newest_ahead, unknown = lag.collect_staging(
+                self.APP, lag.parse_ts("2026-09-20T03:00:00Z"), NOW, 24, A)
+        # A full page of contained dispatches never decides the walk; the
+        # first contained push run on page two does.
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(len(cands), 101)
+        self.assertIsNone(wait_iso)
+        self.assertIsNone(wait_sha)
+        self.assertEqual(newest_ahead, 0)
+        self.assertFalse(unknown)
+        self.assertEqual(compare.call_count, 2)
 
     def test_pager_bound_refuses_an_undecided_prefix(self):
         page = [self.raw_run(number) for number in range(100, 0, -1)]
@@ -528,17 +586,58 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(payload["results"]["Example/new"]["status"], "unknown")
         self.assertEqual(lag.check_exit(payload), 2)
 
+    def test_contained_dispatch_newest_with_waiting_collects_lagging(self):
+        app = {"repo": "Example/app", "prod_workflow": "prod", "prod_job": "ship",
+               "staging_workflow": "stage", "staging_job": "stage"}
+        prod = [run(None, "2026-10-19T02:00:00Z", number=1)]
+        stage = [run(None, "2026-10-19T02:30:00Z", number=3,
+                     event="workflow_dispatch"),
+                 run(None, "2026-10-17T00:00:00Z", number=2)]
+        shas = {1: A, 3: A, 2: B}
+        def jobs(repo, item):
+            name = "stage" if item["number"] in (2, 3) else "ship"
+            return [{"id": item["number"], "name": name, "status": "completed",
+                     "conclusion": "success", "completed_at": item["updated_at"]}]
+        def command(*args):
+            return checkout_log(shas[int(args[-1].split("/")[-2])])
+        def ahead(repo, base, head):
+            return {A: 0, B: 4}[head]
+        with patch.object(lag, "configured_apps", return_value=([app], [])), \
+                patch.object(lag, "fetch_runs", return_value=prod), \
+                patch.object(lag, "iter_success_runs", return_value=iter(stage)), \
+                patch.object(lag, "run_jobs", side_effect=jobs), \
+                patch.object(lag, "gh_command", side_effect=command), \
+                patch.object(lag, "read_live_sha", return_value=A), \
+                patch.object(lag, "compare_ahead_by", side_effect=ahead), \
+                patch.object(lag, "add_merge_times"), contextlib.redirect_stderr(io.StringIO()):
+            payload = lag.collect(argparse.Namespace(), {}, NOW, 28)
+        verdict = payload["results"]["Example/app"]
+        self.assertEqual(verdict["status"], "lagging")
+        self.assertTrue(verdict["alert"])
+        self.assertEqual(verdict["staging_sha"], A)
+        self.assertEqual(lag.parse_ts(verdict["waiting_since"]),
+                         lag.parse_ts("2026-10-17T00:00:00Z"))
+        self.assertEqual(verdict["commits_behind"], 4)
+        self.assertEqual(lag.check_exit(payload), 1)
+
     def test_serving_identity_mismatch_cannot_close_an_alert(self):
-        app = {"repo": "Example/app", "prod_workflow": "prod", "staging_workflow": "stage"}
+        app = {"repo": "Example/app", "prod_workflow": "prod", "staging_workflow": "stage",
+               "staging_job": "ship"}
+        staging = [run(A, "2026-10-19T02:00:00Z")]
         with patch.object(lag, "configured_apps", return_value=([app], [])), \
                 patch.object(lag, "fetch_runs", return_value=[]), \
-                patch.object(lag, "measure_production", return_value=[run(A)]), \
-                patch.object(lag, "measure_staging", return_value=[run(A)]), \
+                patch.object(lag, "measure_production",
+                             return_value=[run(A, "2026-10-19T02:00:00Z")]), \
+                patch.object(lag, "collect_staging",
+                             return_value=(staging, None, None, 0, False)), \
                 patch.object(lag, "add_merge_times"), \
                 patch.object(lag, "read_live_sha", return_value=B), \
                 contextlib.redirect_stderr(io.StringIO()):
             payload = lag.collect(argparse.Namespace(), {}, NOW, 28)
-        self.assertFalse(payload["results"]["Example/app"]["measured"])
+        verdict = payload["results"]["Example/app"]
+        self.assertFalse(verdict["measured"])
+        self.assertEqual(verdict["reason"],
+                         "serving SHA differs from latest verified production target")
         self.assertEqual(lag.check_exit(payload), 2)
 
     def test_dora_reuses_snapshot_including_discovered_unknown_app(self):

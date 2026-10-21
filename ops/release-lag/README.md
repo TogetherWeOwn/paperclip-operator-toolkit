@@ -14,6 +14,9 @@ For each configured app:
 1. Read complete, bounded production history and the actual deployment job.
    Staging pages newest-first successes and stops once the lag boundary is
    decided, so high-volume staging histories cannot exhaust the fetch bound.
+   A contained push or scheduled run ends the walk; pinned dispatches are
+   verified as candidates but never end it, because rollback drills
+   intentionally re-verify old targets out of ancestry order.
 2. Exclude skipped, cancelled and neutral jobs from deployment attempts.
    Non-deployment run outcomes without a matching job keep their run-level
    outcome instead of failing the whole app.
@@ -34,9 +37,12 @@ For each configured app:
 | two-bot-next | `wrangler … + readyz gate` | First target checkout in `wrangler deploy + intended rollout gate`, including pinned dispatches |
 
 The checkout resolver follows the configured workflows' target-first ordering.
-A changed job/checkout contract, expired logs, unexpected response, unavailable
-public endpoint or inconsistent evidence is **unknown**, never a fallback to
-workflow head. Raw job logs are neither printed nor persisted by the detector.
+The walk boundary assumes non-dispatch staging completions arrive in ancestry
+order; pinned dispatches are exempt because rollback drills intentionally
+break that order. A changed job/checkout contract, expired logs, unexpected
+response, unavailable public endpoint or inconsistent evidence is **unknown**,
+never a fallback to workflow head. Raw job logs are neither printed nor
+persisted by the detector.
 
 The configured public health URLs expose only the serving revision fields used
 by this monitor. No credential is supplied to these URLs. HTTP errors remain
@@ -50,8 +56,9 @@ unknown, including a public endpoint that rejects the monitor's HTTP client.
   and a lower bound when it stops at the first old-enough one.
 - **stale-prod:** no successful actual production deployment in seven days.
   Green no-op workflow runs do not refresh this clock.
-- **ok:** measured equality, a candidate already contained in production, or a
-  newer candidate still within the threshold.
+- **ok:** newest equality with no older waiting candidate found, a candidate
+  already contained in production, or a newer candidate still within the
+  threshold.
 - **unknown:** missing or unreadable evidence. Existing alert issues stay open.
 
 Exit `0`: all apps measured ok. Exit `1`: measured drift. Exit `2`: any unknown
@@ -70,9 +77,10 @@ Inventory lists paginate up to 20 pages of 100. Time-filtered production
 histories paginate up to 10 pages of 100; reaching a bound refuses the
 measurement rather than reporting partial numbers. Staging uses the same
 10-page bound but pages server-filtered successes newest-first and stops at
-the lag boundary, so it normally reads one page. Commands have 120-second
-timeouts and the job has a 20-minute timeout. No credential fallback or
-retries are performed.
+the lag boundary — a contained non-dispatch run, proven lag, or an unreadable
+compare — so it normally reads one page. Commands have 120-second timeouts
+and the job has a 20-minute timeout. No credential fallback or retries are
+performed.
 
 ## DORA interpretation
 
@@ -103,10 +111,13 @@ actionlint .github/workflows/release-lag.yml
 
 The original fixture acceptance suite is unchanged. Additional implementer-owned
 regressions cover promotion targets/no-ops, ancestry, the oldest-waiting lag
-clock, lazy staging paging with early stop, the serving-identity User-Agent,
-non-deployment job outcomes, unknown alert preservation, pagination, discovery,
-non-change DORA conclusions, issue state dedupe, and digest creation. Isolated
-oldest-success and removed-equal-SHA-guard mutants must both turn the
-regressions red, as must ignoring the waiting boundary, reverting to the
+clock, lazy staging paging with early stop past contained dispatches, the
+serving-identity User-Agent, non-deployment job outcomes, unknown alert
+preservation, pagination, discovery, non-change DORA conclusions, issue state
+dedupe, and digest creation. Isolated oldest-success and removed-equal-SHA-guard
+mutants must both turn the regressions red, as must ignoring the waiting
+boundary, stopping the walk at a contained dispatch, deriving the verdict
+from the newest candidate alone, letting newest equality override a found
+waiting candidate, dropping the serving-identity compare, reverting to the
 default HTTP client, raising on unmatched non-deployment runs, or dropping
 the staging success filter.

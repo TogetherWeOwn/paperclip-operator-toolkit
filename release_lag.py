@@ -121,6 +121,7 @@ def normalize_run(raw):
         "conclusion": raw.get("conclusion"),
         "number": raw.get("id"),
         "attempt": raw.get("run_attempt", 1),
+        "event": raw.get("event"),
         "title": raw.get("display_title", ""),
         "url": raw.get("html_url"),
     }
@@ -207,7 +208,11 @@ def evaluate_app(prod_runs, staging_runs, now, lag_hours=DEFAULT_LAG_HOURS,
         return verdict
 
     verdict["status"] = "ok"
-    if staging.get("sha") == prod.get("sha"):
+    if staging.get("sha") == prod.get("sha") and waiting_sha is None:
+        # Newest equality proves nothing when the walk found an older
+        # waiting candidate: a pinned dispatch can re-verify the
+        # production SHA after that candidate already waited past the
+        # threshold. The waiting clock below then drives the verdict.
         verdict["reason"] = "production matches newest staging-green candidate"
         return verdict
     # The pure API supports chronological fixtures; live checks always pass
@@ -590,9 +595,12 @@ def collect_staging(app, since, now, lag_hours, prod_sha):
     newest_ahead, unknown): candidates are verified newest-first, waiting_*
     describe the oldest verified green ahead of production, newest_ahead is
     the compare result for the newest candidate, and unknown is true when
-    ancestry cannot be read. A contained candidate ends the walk with an exact
-    boundary; a candidate older than the threshold ends it with lag proven
-    (reported hours are then a lower bound); an unreadable compare, a missing
+    ancestry cannot be read. A contained non-dispatch candidate ends the
+    walk with an exact boundary; pinned dispatches are verified as
+    candidates but never end it, because rollback drills intentionally
+    re-verify old targets out of ancestry order. An ahead candidate
+    older than the threshold ends the walk with lag proven (reported
+    hours are then a lower bound); an unreadable compare, a missing
     contract, or an exhausted paging bound reports unknown, never ok.
     """
     if not app.get("staging_source") and not app.get("staging_job"):
@@ -618,6 +626,12 @@ def collect_staging(app, since, now, lag_hours, prod_sha):
         if len(candidates) == 1:
             newest_ahead = ahead
         if ahead == 0:
+            if verified.get("event") == "workflow_dispatch":
+                # A pinned dispatch can re-verify the production SHA
+                # after an older candidate waited, so it never ends
+                # the walk; the scan continues to a non-dispatch
+                # boundary or a proven wait.
+                continue
             break
         waiting = verified
         green = parse_ts(verified.get("updated_at"))
@@ -756,8 +770,13 @@ def collect(args, config, now, window):
                     app, since, now, lag_hours, prod["sha"])
                 if walk_unknown:
                     ahead = None
+            # The verdict follows any ahead candidate the scan found, not
+            # just the newest one: a contained newest can hide an older
+            # waiting candidate behind a pinned dispatch.
+            candidate_ahead = (None if ahead is None
+                               else (ahead > 0 or wait_sha is not None))
             verdict = evaluate_app(prod_runs, staging_runs, now, lag_hours, stale_days,
-                                   candidate_ahead=None if ahead is None else ahead > 0,
+                                   candidate_ahead=candidate_ahead,
                                    waiting_since=wait_iso, waiting_sha=wait_sha)
             # A successfully read empty production window proves staleness,
             # unlike a failed read (which reaches the exception path).
@@ -765,7 +784,13 @@ def collect(args, config, now, window):
                 verdict.update(status="stale-prod", measured=True, alert=True,
                                reason="no successful production deploy in %d days" % stale_days)
             verdict["key"] = dedupe_key(repo)
-            verdict["commits_behind"] = ahead
+            behind = ahead
+            if wait_sha is not None and behind == 0:
+                # The newest compare says contained while an older
+                # candidate waits ahead; resolve its distance so the
+                # payload stays coherent with a lagging verdict.
+                behind = compare_ahead_by(repo, prod["sha"], wait_sha)
+            verdict["commits_behind"] = behind
             results[repo] = verdict
         except RuntimeError as exc:
             verdict["reason"] = str(exc)
