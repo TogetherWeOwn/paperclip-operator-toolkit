@@ -476,6 +476,42 @@ class StagingWalkTests(unittest.TestCase):
         self.assertFalse(unknown)
         self.assertEqual(compare.call_count, 2)
 
+    def test_future_retitled_newest_is_skipped_before_verification(self):
+        # Pins the raw as-of skip in collect_staging: a post-clock newest
+        # run must be dropped BEFORE verify_staging_candidate, which would
+        # raise on a retitled web-e2e newest (examined == 0) and poison the
+        # walk even though the later verified-stamp skip would have caught
+        # the same run had verification not raised first.
+        app = {"repo": "Example/app", "staging_source": "web-e2e-title"}
+        future = dict(run(None, "2026-10-19T03:01:00Z", number=3),
+                      title="renamed workflow")
+        good = dict(run(None, "2026-10-19T02:00:00Z", number=4),
+                    title="e2e-staging deploy " + B)
+        steps = [{"name": name, "conclusion": "success"} for name in (
+            "Lighthouse performance budgets (mobile, ci/lighthouserc.cjs)",
+            "Lighthouse quality scores (desktop, categories vs ci/quality-budget.json)")]
+        fixture = [{"name": "staging-journeys", "conclusion": "success"},
+                   {"name": "staging-quality / quality", "conclusion": "success",
+                    "steps": steps}]
+        seen = []
+
+        def fetch_jobs(repo, item):
+            seen.append(item["number"])
+            return fixture
+
+        with patch.object(lag, "iter_success_runs",
+                          return_value=iter([future, good])), \
+                patch.object(lag, "run_jobs", side_effect=fetch_jobs), \
+                patch.object(lag, "compare_ahead_by", return_value=2):
+            cands, wait_iso, wait_sha, newest_ahead, unknown = lag.collect_staging(
+                app, None, NOW, 24, A)
+        self.assertNotIn(3, seen)
+        self.assertEqual([c["sha"] for c in cands], [B])
+        self.assertEqual(wait_iso, "2026-10-19T02:00:00Z")
+        self.assertEqual(wait_sha, B)
+        self.assertEqual(newest_ahead, 2)
+        self.assertFalse(unknown)
+
     def test_first_retitled_run_raises_later_retitled_skipped(self):
         app = {"repo": "Example/app", "staging_source": "web-e2e-title"}
         bad = dict(run(None, "2026-10-19T02:00:00Z", number=3), title="renamed workflow")
@@ -736,6 +772,45 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(verdict["staging_sha"], A)
         self.assertEqual(payload["dora"]["Example/app"]["deploys"], 1)
         self.assertEqual(compare.call_count, 1)
+        self.assertEqual(lag.check_exit(payload), 0)
+
+    def test_future_prod_run_is_excluded_before_job_resolution(self):
+        # Pins the raw as-of pre-filter in collect: a mid-check prod
+        # completion whose job is not yet readable must be dropped before
+        # measure_production resolves jobs, or the missing job raises and
+        # the app goes unknown for one run. The post-measure filter then
+        # validates the verified job completion timestamp.
+        app = {"repo": "Example/app", "prod_workflow": "prod", "prod_job": "ship",
+               "staging_workflow": "stage", "staging_job": "stage"}
+        prod = [run(None, "2026-10-19T03:01:00Z", number=2),
+                run(None, "2026-10-19T02:00:00Z", number=1)]
+        stage = [run(None, "2026-10-19T02:00:00Z", number=3)]
+        seen = []
+
+        def jobs(repo, item):
+            seen.append(item["number"])
+            if item["number"] == 2:
+                return []
+            name = "stage" if item["number"] == 3 else "ship"
+            return [{"id": item["number"], "name": name, "status": "completed",
+                     "conclusion": "success", "completed_at": item["updated_at"]}]
+
+        with patch.object(lag, "configured_apps", return_value=([app], [])), \
+                patch.object(lag, "fetch_runs", return_value=prod), \
+                patch.object(lag, "iter_success_runs", return_value=iter(stage)), \
+                patch.object(lag, "run_jobs", side_effect=jobs), \
+                patch.object(lag, "gh_command",
+                             return_value=checkout_log(A)), \
+                patch.object(lag, "read_live_sha", return_value=A), \
+                patch.object(lag, "compare_ahead_by", return_value=0), \
+                patch.object(lag, "add_merge_times"), contextlib.redirect_stderr(io.StringIO()):
+            payload = lag.collect(argparse.Namespace(), {}, NOW, 28)
+        verdict = payload["results"]["Example/app"]
+        self.assertNotIn(2, seen)
+        self.assertTrue(verdict["measured"])
+        self.assertEqual(verdict["status"], "ok")
+        self.assertEqual(verdict["prod_sha"], A)
+        self.assertEqual(verdict["staging_sha"], A)
         self.assertEqual(lag.check_exit(payload), 0)
 
     def test_serving_identity_mismatch_cannot_close_an_alert(self):

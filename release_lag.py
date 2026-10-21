@@ -792,8 +792,13 @@ def collect(args, config, now, window):
         verdict["key"] = dedupe_key(repo)
         results[repo], dora[repo] = verdict, None
         try:
-            prod_runs = asof_runs(
-                measure_production(app, fetch_runs(repo, app.get("prod_workflow"), since)), now)
+            # Exclude post-clock runs BEFORE job resolution: a mid-check
+            # completion whose job is not yet readable would otherwise raise
+            # in measure_production and poison a decided verdict. The second
+            # filter validates the verified job completion timestamp.
+            raw_prod_runs = asof_runs(
+                fetch_runs(repo, app.get("prod_workflow"), since), now)
+            prod_runs = asof_runs(measure_production(app, raw_prod_runs), now)
             add_merge_times(repo, prod_runs)
             dora[repo] = compute_dora(prod_runs, now, window)
             prod = latest(successful(prod_runs))
