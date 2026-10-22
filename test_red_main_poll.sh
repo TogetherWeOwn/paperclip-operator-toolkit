@@ -62,13 +62,18 @@ TOOL="$HERE/red_main_poll.sh"
 PASS=0; FAIL=0
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"; [[ -n "${STUB_PID:-}" ]] && kill "$STUB_PID" 2>/dev/null' EXIT
+cleanup() {
+  [[ -z "${HANG_PID:-}" ]] || { kill "$HANG_PID" 2>/dev/null || true; wait "$HANG_PID" 2>/dev/null || true; }
+  [[ -z "${STUB_PID:-}" ]] || { kill "$STUB_PID" 2>/dev/null || true; wait "$STUB_PID" 2>/dev/null || true; }
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 ok()  { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "${2:-}"; }
 hdr() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-for c in node curl jq sha1sum python3; do
+for c in node curl jq sha1sum python3 timeout; do
   command -v "$c" >/dev/null 2>&1 || { echo "test_red_main_poll: $c is required" >&2; exit 2; }
 done
 [[ -x "$TOOL" ]] || { echo "test_red_main_poll: tool missing at $TOOL" >&2; exit 2; }
@@ -129,6 +134,9 @@ const CASES = {
   'o/red-status-only': { checks: { total_count: 0, check_runs: [] },
                          statuses: { state: 'failure', statuses: [{ context: 'buildkite', state: 'failure' }] },
                          runs: { total_count: 0, workflow_runs: [] } },
+  'o/red-status-checks-denied': { checks: 403,
+                         statuses: { state: 'failure', statuses: [{ context: 'buildkite', state: 'failure' }] },
+                         runs: 403 },
   'o/green':       { checks: { total_count: 2, check_runs: greenRuns }, statuses: 403, runs: 403 },
   'o/denied':      { checks: 403, statuses: 403, runs: 403 },
   'o/empty':       { checks: { total_count: 0, check_runs: [] }, statuses: { state: 'pending', statuses: [] }, runs: { total_count: 0, workflow_runs: [] } },
@@ -456,6 +464,16 @@ printf '%s' "$OUT" | jq -e '(.redMains[0].signature | length) == 8' >/dev/null 2
   && ok "reason-keyed signature is still 8 hex chars" \
   || bad "reason-keyed signature is still 8 hex chars" "$OUT"
 
+hdr "A denied check-runs read keeps the reader reason, never hides the red"
+snapshot o/red-status-checks-denied
+[[ "$RC" -eq 1 ]] && ok "status red with denied check runs exits 1" || bad "status red with denied check runs exits 1" "got $RC"
+printf '%s' "$OUT" | jq -e '.redMains[0].sigSource == "reason"' >/dev/null 2>&1 \
+  && ok "denied check runs record sigSource:reason" \
+  || bad "denied check runs record sigSource:reason" "$OUT"
+printf '%s' "$OUT" | jq -e '(.redMains[0].failingJobs | length) > 0' >/dev/null 2>&1 \
+  && ok "denied check runs key on the reader reason, not the empty set" \
+  || bad "denied check runs key on the reader reason, not the empty set" "$OUT"
+
 hdr "A failure past page 1 keys on the check set, not the reason"
 snapshot o/red-paged
 [[ "$RC" -eq 1 ]] && ok "paged red exits 1" || bad "paged red exits 1" "got $RC"
@@ -466,12 +484,15 @@ printf '%s' "$OUT" | jq -e '.redMains[0].failingJobs == "late-failure"' >/dev/nu
   && ok "paged red names the page-2 failure" \
   || bad "paged red names the page-2 failure" "$OUT"
 
-hdr "A short check-run read keys on the reason, never on a partial set"
+hdr "A short check-run read is unknown, never a reason-keyed red"
 snapshot o/red-paged-short
-[[ "$RC" -eq 1 ]] && ok "short-read red exits 1" || bad "short-read red exits 1" "got $RC"
-printf '%s' "$OUT" | jq -e '.redMains[0].sigSource == "reason"' >/dev/null 2>&1 \
-  && ok "short-read red keys on the reason, not the rows it could read" \
-  || bad "short-read red keys on the reason, not the rows it could read" "$OUT"
+[[ "$RC" -eq 3 ]] && ok "short-read exits 3 (unmeasurable), never a reason-keyed red" || bad "short-read exits 3 (unmeasurable), never a reason-keyed red" "got $RC"
+printf '%s' "$OUT" | jq -e '.redMains == []' >/dev/null 2>&1 \
+  && ok "short-read emits no red entry" \
+  || bad "short-read emits no red entry" "$OUT"
+[[ "$ERR" == *"check-runs could not be read"* ]] \
+  && ok "short-read names the unreadable check-runs on stderr" \
+  || bad "short-read names the unreadable check-runs on stderr" "$ERR"
 
 hdr "Attacker-influenced names cannot break the key (sentinel job name)"
 snapshot o/evil-name
@@ -692,6 +713,96 @@ WANT="$(printf 'lint a\nlint-a\nlint.c\nlint_b' | sha1sum | cut -c1-8)"
 [[ "$SP" == "$WANT" ]] && ok "signature is sha1 over byte-ordered names (independent oracle)" || bad "signature is sha1 over byte-ordered names (independent oracle)" "got=$SP want=$WANT"
 OUT="$(LC_ALL=en_US.UTF-8 "$TOOL" snapshot o/red-punct 2>/dev/null)"
 [[ "$(sig_of o/red-punct)" == "$WANT" ]] && ok "the same signature under a non-C locale" || bad "the same signature under a non-C locale" "got=$(sig_of o/red-punct)"
+
+cat > "$WORK/failing-ci-reader.sh" <<'READER'
+#!/usr/bin/env bash
+printf '%s\n' '{"verdict":"fail","reason":"measured red"}'
+exit 1
+READER
+chmod +x "$WORK/failing-ci-reader.sh"
+cat > "$WORK/sleeping-ci-reader.sh" <<'READER'
+#!/usr/bin/env bash
+sleep 30
+READER
+chmod +x "$WORK/sleeping-ci-reader.sh"
+
+start_hang_server() {
+  cat > "$WORK/hang-server.py" <<'PY'
+import socket
+import sys
+import time
+
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", 0))
+server.listen(1)
+print(server.getsockname()[1], flush=True)
+connection, _ = server.accept()
+with connection:
+    with open(sys.argv[1], "w") as accepted:
+        accepted.write("yes\n")
+    time.sleep(60)
+PY
+  : > "$WORK/hang-port.txt"
+  : > "$WORK/hang-accepted"
+  python3 "$WORK/hang-server.py" "$WORK/hang-accepted" > "$WORK/hang-port.txt" 2> "$WORK/hang-server.err" &
+  HANG_PID=$!
+  for _ in $(seq 1 50); do [[ -s "$WORK/hang-port.txt" ]] && break; sleep 0.05; done
+  HANG_PORT="$(tr -d '\n' < "$WORK/hang-port.txt")"
+  [[ -n "$HANG_PORT" ]] || return 1
+  HANG_URL="http://127.0.0.1:$HANG_PORT"
+}
+stop_hang_server() {
+  [[ -n "${HANG_PID:-}" ]] || return 0
+  kill "$HANG_PID" 2>/dev/null || true
+  wait "$HANG_PID" 2>/dev/null || true
+  HANG_PID=
+}
+
+hdr "A GitHub connection that never answers is unknown, never silent"
+if start_hang_server; then
+  start=$SECONDS
+  OUT="$(timeout 4s env GH_API_URL="$HANG_URL" \
+    GH_CI_STATUS_BIN="$WORK/failing-ci-reader.sh" INCIDENT_SOURCE_CMD="cat $TITLES" \
+    RED_MAIN_POLL_CURL_CONNECT_TIMEOUT=1 RED_MAIN_POLL_CURL_MAX_TIME=1 \
+    "$TOOL" snapshot o/red-timeout 2>"$WORK/err.txt")"
+  RC=$?; elapsed=$((SECONDS - start)); ERR="$(cat "$WORK/err.txt")"
+  [[ "$RC" -eq 3 ]] && ok "hung GitHub exits 3 (unmeasurable), never a clean pass" || bad "hung GitHub exits 3 (unmeasurable), never a clean pass" "rc=$RC out=$OUT err=$ERR"
+  printf '%s' "$OUT" | jq -e '.redMains == []' >/dev/null 2>&1 \
+    && ok "hung GitHub emits no red entry" || bad "hung GitHub emits no red entry" "$OUT"
+  [[ -s "$WORK/hang-accepted" ]] && ok "the loopback server accepted the curl connection" || bad "the loopback server accepted the curl connection"
+  [[ "$elapsed" -le 3 ]] && ok "the accepted loopback connection is bounded to a few seconds" || bad "the accepted loopback connection is bounded to a few seconds" "elapsed=${elapsed}s"
+  [[ "$OUT$ERR" != *not-a-real-token* ]] \
+    && ok "the GitHub token stays out of output" || bad "the GitHub token stays out of output"
+else
+  bad "the GitHub loopback hang server starts" "$(cat "$WORK/hang-server.err")"
+fi
+stop_hang_server
+
+hdr "A hung CI reader is cut off by its own timeout"
+start=$SECONDS
+OUT="$(timeout 8s env GH_CI_STATUS_BIN="$WORK/sleeping-ci-reader.sh" \
+  INCIDENT_SOURCE_CMD="cat $TITLES" RED_MAIN_POLL_READER_TIMEOUT=2 \
+  "$TOOL" snapshot o/red-same-a 2>"$WORK/err.txt")"
+RC=$?; elapsed=$((SECONDS - start)); ERR="$(cat "$WORK/err.txt")"
+[[ "$RC" -eq 3 ]] && ok "a hung CI reader exits 3 (unmeasurable), never a clean pass" || bad "a hung CI reader exits 3 (unmeasurable), never a clean pass" "rc=$RC out=$OUT err=$ERR"
+[[ "$elapsed" -le 6 ]] && ok "the reader run is cut off within a few seconds" || bad "the reader run is cut off within a few seconds" "elapsed=${elapsed}s"
+
+hdr "A hung board read is bounded, never silent"
+if start_hang_server; then
+  start=$SECONDS
+  OUT="$(timeout 10s env -u INCIDENT_SOURCE_CMD -u PAPERCLIP_COMPANY_ID PAPERCLIP_API_URL="$HANG_URL" RED_MAIN_ROLLUP_PARENT_ID=parent-known RED_MAIN_API_KEY=canary-board-key-001 RED_MAIN_POLL_CURL_CONNECT_TIMEOUT=1 RED_MAIN_POLL_CURL_MAX_TIME=1 "$TOOL" snapshot o/green 2>"$WORK/err.txt")"
+  RC=$?; elapsed=$((SECONDS - start)); ERR="$(cat "$WORK/err.txt")"
+  [[ "$RC" -eq 3 ]] && ok "hung board read exits 3 (unmeasurable), never a clean pass" || bad "hung board read exits 3 (unmeasurable), never a clean pass" "rc=$RC out=$OUT err=$ERR"
+  [[ -z "$OUT" ]] && ok "hung board read prints no fragment" || bad "hung board read prints no fragment" "$OUT"
+  [[ -s "$WORK/hang-accepted" ]] && ok "the loopback server accepted the board connection" || bad "the loopback server accepted the board connection"
+  [[ "$elapsed" -le 6 ]] && ok "the hung board read is bounded to a few seconds" || bad "the hung board read is bounded to a few seconds" "elapsed=${elapsed}s"
+  [[ "$OUT$ERR" != *canary-board-key-001* ]] \
+    && ok "the board key stays out of output" || bad "the board key stays out of output"
+else
+  bad "the board loopback hang server starts" "$(cat "$WORK/hang-server.err")"
+fi
+stop_hang_server
 
 # Host-wrapper and operator-packet sections intentionally absent: they
 # need the host wrapper and install packet, which live outside this slice.

@@ -82,7 +82,7 @@ assert_enabled() {
 }
 
 # Reaches PostgreSQL through lib/pcsql.sh rather than one hard-wired container,
-# so this tool can be pointed at a throwaway database (TOG-202, TOG-300). The
+# so this tool can be pointed at a throwaway database. The
 # flags and the :cid/:a/:b bindings are the ones this tool always used and the
 # podman command pcsql_run builds is the one that was here; only the choice of
 # transport moved. Note this tool never set ON_ERROR_STOP and still does not —

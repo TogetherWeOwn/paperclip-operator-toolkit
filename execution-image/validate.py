@@ -12,7 +12,8 @@ import sys
 MAX_BYTES = 64 * 1024
 FILES = {"Dockerfile", "native.sources", "native-packages.json",
          "runtime-contract.json", "validate.py", "test_manifest.py", "README.md"}
-PACKAGES = {"binutils", "gcc", "gcc-14", "libc6-dev", "pkg-config", "pkgconf"}
+PACKAGES = {"binutils", "clang", "clang-19", "gcc", "gcc-14", "libc6-dev", "llvm", "llvm-19",
+            "pkg-config", "pkgconf"}
 RUNTIME = {
     "schema": "execution-image.runtime-contract.v1",
     "execution_user": "1000:1000",
@@ -20,7 +21,8 @@ RUNTIME = {
     "entrypoint": "inherit_verified_standard_production",
     "command": "inherit_verified_standard_production",
     "rust_toolchain": "preserve_existing_package_owned_1.98.1",
-    "compiler_paths": ["/usr/bin/cc", "/usr/bin/gcc", "/usr/bin/ld", "/usr/bin/ar", "/usr/bin/pkg-config"],
+    "compiler_paths": ["/usr/bin/cc", "/usr/bin/gcc", "/usr/bin/ld", "/usr/bin/ar", "/usr/bin/pkg-config",
+                       "/usr/bin/clang", "/usr/bin/llvm-ar"],
     "wrapper": "preserve_exact_source_pin_no_direct_cargo",
     "pool": "preserve_existing_protected_finite_filesystem_no_new_pool",
     "outputs": "preserve_target_scratch_external_outputs_leases_and_process_ownership",
@@ -100,7 +102,14 @@ def dockerfile(base, native):
             "    && test -x /usr/bin/cc && test -x /usr/bin/gcc \\\n"
             "    && test -x /usr/bin/ld && test -x /usr/bin/ar && test -x /usr/bin/pkg-config \\\n"
             "    && test -r /usr/include/stdio.h \\\n"
-            "    && /usr/bin/gcc --version && /usr/bin/ld --version && /usr/bin/pkg-config --version'\n")
+            "    && /usr/bin/gcc --version && /usr/bin/ld --version && /usr/bin/pkg-config --version \\\n"
+            "    && test -x /usr/bin/clang && test -x /usr/bin/llvm-ar \\\n"
+            "    && /usr/bin/clang --version && /usr/bin/llvm-ar --version \\\n"
+            "    && d=\"$(mktemp -d)\" && trap \"rm -rf $d\" EXIT \\\n"
+            "    && printf \"int f(int a){return a+1;}\\n\" > \"$d/w.c\" \\\n"
+            "    && /usr/bin/clang --target=wasm32-unknown-unknown -ffreestanding -c \"$d/w.c\" -o \"$d/w.o\" \\\n"
+            "    && test \"$(od -An -tx1 -N4 \"$d/w.o\" | tr -d \" \\n\")\" = 0061736d \\\n"
+            "    && /usr/bin/llvm-ar rc \"$d/w.a\" \"$d/w.o\" && test -s \"$d/w.a\"'\n")
 
 
 def validate(manifest, files):

@@ -5,7 +5,7 @@
   "entrypoint": "inherit_verified_standard_production",
   "command": "inherit_verified_standard_production",
   "rust_toolchain": "preserve_existing_package_owned_1.98.1",
-  "compiler_paths": ["/usr/bin/cc", "/usr/bin/gcc", "/usr/bin/ld", "/usr/bin/ar", "/usr/bin/pkg-config"],
+  "compiler_paths": ["/usr/bin/cc", "/usr/bin/gcc", "/usr/bin/ld", "/usr/bin/ar", "/usr/bin/pkg-config", "/usr/bin/clang", "/usr/bin/llvm-ar"],
   "wrapper": "preserve_exact_source_pin_no_direct_cargo",
   "pool": "preserve_existing_protected_finite_filesystem_no_new_pool",
   "outputs": "preserve_target_scratch_external_outputs_leases_and_process_ownership",

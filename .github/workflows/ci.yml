@@ -58,6 +58,10 @@ name: CI
 #                                       cannot reach a database, and whether
 #                                       their refusal assertions name the gate
 #                                       they claim to test — TOG-402
+#     test_sdlc_foundation_*.{sh,py}     templates/org-github/: whether the staged
+#                                       SDLC foundation (ruleset twins, one exclude
+#                                       list, discovery, day-1 template) still
+#                                       holds its adoption contract
 #     test_tool_drift.sh                tool_drift.sh: whether the copy that RUNS
 #                                       is the copy that is REVIEWED — TOG-212
 #     test_channel_drift.sh             channel_drift.sh: whether a runnable file
@@ -112,6 +116,16 @@ name: CI
 #     test_liveness_reconciler.py       four recurring task-liveness gaps, native-path
 #                                       diagnostics, bounded owned repair, and owner-HOLD refusal
 #                                       — TOG-586
+#     test_shadow_seat_exclusion.py     shadow_seat_exclusion.py: seat-exact exclusion
+#                                       of append-once shadow seats from generic
+#                                       recovery/admission paths
+#     test_review_dedup.py              review_dedup.py: whether a covered head
+#                                       can be review-requested twice — one
+#                                       retry max on errors, unknown states
+#                                       fail closed toward suppress
+#     test_review_dedup_placement.sh    whether that public, stdlib-only guard
+#                                       lives in this repo at all, and still
+#                                       exposes the idempotency API
 #     test_pacing_verdict.py            pacing_verdict.py: whether a sample older
 #                                       than the 120m cutoff can still be read as
 #                                       a live verdict. Every age case carries a
@@ -362,7 +376,7 @@ jobs:
     outputs:
       heavy: ${{ steps.detect.outputs.heavy }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: detect
@@ -484,7 +498,7 @@ jobs:
           "$PGBIN/createdb" -h 127.0.0.1 -p "$PGPORT" -U "$PGUSER" "$PGDATABASE"
           echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
           echo "ORGDB_PGDATA=$PGDATA" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Postgres client and jq
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
@@ -656,7 +670,7 @@ jobs:
           [[ "${RUNNER_ARCH:-}" == X64 ]]
           printf 'runner: name=%s os=%s arch=%s\n' "${RUNNER_NAME:-unknown}" "$RUNNER_OS" "$RUNNER_ARCH"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           clean: true
           # The static-label guard below compares complete workflow selectors
@@ -1106,6 +1120,13 @@ jobs:
       - name: task liveness reconciler suite
         run: python3 -m unittest -v test_liveness_reconciler.py
 
+      # Shadow seat exclusion: seat-exact guard keeping append-once shadow
+      # seats out of generic recovery/admission (retrier, replay, comment
+      # wake, idle admission). Pure fixtures: no API, database, credential
+      # or timer.
+      - name: shadow seat exclusion suite
+        run: python3 -m unittest -v test_shadow_seat_exclusion.py
+
       # Admitted-PR closeout ledger: explicit registry (never a body parse),
       # exact-SHA check/review evidence, drafts and releases as owned
       # non-auto-merge work, bounded diagnostic-only proposals. Pure
@@ -1113,8 +1134,77 @@ jobs:
       - name: admitted-PR closeout ledger suite
         run: python3 -m unittest -v test_pr_closeout_ledger.py
 
+      # Offline-only shadow metric tests; no GitHub or production collection in CI.
+      - name: escape ledger linkage suite
+        run: python3 -I -m unittest discover -s ops/kpi -p 'test_escape_ledger.py' -v
+
+      # Blocker-ledger classes 4-7: deterministic pre-review gates
+      # (migration, API contract, concurrency, lockfile). Logic is stdlib;
+      # acceptance parses delivered workflows with the pinned PyYAML above.
+      # No network, clock or credentials in the suites.
+      - name: blocker-ledger classes 4-7 suites
+        env:
+          PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
+        run: python3 -B -m unittest test_blocker_migration_checks test_blocker_api_contract_checks test_blocker_concurrency_checks test_blocker_lockfile_checks test_blocker_classes47_org_template test_blocker_classes47_round2_regression test_blocker_classes47_round3_regression test_blocker_classes47_round4_regression test_blocker_classes47_round5_regression test_blocker_classes47_review_acceptance test_blocker_classes47_round6_regression test_blocker_classes47_round7_regression test_blocker_classes47_round8_regression test_blocker_classes47_round9_regression test_blocker_classes47_round10_regression test_blocker_classes47_round11_regression test_blocker_classes47_round12_regression test_blocker_classes47_round13_regression test_blocker_classes47_round14_regression test_blocker_classes47_round15_regression test_blocker_classes47_round16_regression
+
       - name: admitted-PR closeout gates are load-bearing (mutation-gated)
         run: ./verification/closeout-ledger-mutation-gate.sh
+
+      # TOG-24380. Deterministic test-missing gate (stdlib only, no network,
+      # no clock) plus its staged org drop. Offline: no API, no credential.
+      - name: test-missing gate suite
+        run: python3 -B -m unittest test_test_missing_gate
+
+      - name: test-missing gate placement suite
+        run: bash test_test_missing_gate_placement.sh
+
+      # Review trigger and same-head idempotency guard. The trigger decision
+      # (review_trigger.decide) and the step glue are pure stdlib with a
+      # faked GitHub API; the dedup guard, the one-retry reconciler and the
+      # orphan sweeper are offline with stubbed subprocesses. No API,
+      # database, credential or timer.
+      - name: review trigger decision suite
+        run: python3 -m unittest discover -s .github/scripts -p 'test_review_trigger.py'
+
+      - name: review trigger step suite
+        run: python3 -m unittest discover -s .github/scripts -p 'test_review_trigger_step.py'
+
+      - name: same-head review idempotency suites
+        run: (cd ops/productivity && python3 -B -m unittest -v test_review_error_rerequest test_orphan_prs)
+
+      # Same-head review idempotency guard: never request a covered head,
+      # one retry max on errors, unknown states fail closed toward suppress.
+      # Pure fixtures: no API, database, credential or timer.
+      - name: same-head review idempotency guard suite
+        run: python3 -m unittest -v test_review_dedup.py
+
+      - name: review_dedup placement gate
+        run: ./test_review_dedup_placement.sh
+
+      - name: shared config/deploy checks suite
+        run: python3 -m unittest -v test_config_deploy_check.py
+
+      - name: config/deploy placement gate
+        run: ./test_config_deploy_placement.sh
+
+      # Release-lag + DORA per deployed app: the detector fires on a lagging
+      # history and stays silent on a fresh one, all offline against fixtures
+      # under test/fixtures/release-lag/. The scheduled release-lag workflow
+      # owns the live reads; CI proves the verdicts, never the network.
+      - name: release-lag detector suite
+        run: python3 -m unittest -v test_release_lag.py test_release_lag_regressions.py
+
+      - name: pr-hygiene fault-visibility suite
+        run: python3 -m unittest -v test_pr_hygiene_fault_visibility.py
+
+      - name: pr-hygiene fault-visibility placement
+        run: ./test_pr_hygiene_fault_visibility_placement.sh
+
+      - name: pr-hygiene fault-coverage suite
+        run: python3 -m unittest -v test_pr_hygiene_fault_coverage.py
+
+      - name: pr-hygiene gates are load-bearing (mutation-gated)
+        run: ./verification/pr-hygiene-mutation-gate.sh
 
       # Host deployment contracts (systemd units, installers) live outside the
       # public tree with their suites; they are covered in their source repo.
@@ -1771,6 +1861,18 @@ jobs:
       - name: sibling-run guard suite
         run: ./test_sibling_guard.sh
 
+      # The staged SDLC 1.0 foundation under templates/org-github/ is
+      # public code whose landing is only complete while it lives here and
+      # keeps its contract: ruleset twins differing only in enforcement,
+      # the one exclude list driving discovery and the rendered payload,
+      # and a day-1 template that never path-filters the required check.
+      # Offline and hermetic: the discovery seam reads a fixture file.
+      - name: sdlc_foundation suite
+        run: |
+          ./test_sdlc_foundation_placement.sh
+          python3 -m unittest test_sdlc_foundation_acceptance -v
+          ./templates/org-github/tests/test_sdlc_foundation.sh
+
       # TOG-212. Whether the copy of a tool that RUNS is the copy that is
       # REVIEWED. The suite fabricates a throwaway git repo and a "deployed"
       # directory in mktemp, so it needs no VPS, no network and no credential.
@@ -2161,7 +2263,7 @@ jobs:
       #
       # The suite builds its own scratch git repo and its own audit ref, so it
       # needs neither `origin/main` nor any remote branch. That is deliberate:
-      # actions/checkout@v4 clones --depth=1 --single-branch, and an earlier
+      # actions/checkout@v7 clones --depth=1 --single-branch, and an earlier
       # revision that pinned fixtures to real refs would have been a
       # permanently red step that never once scored a mutant.
       # Pin-conformance and fork-disclosure gates whose subjects live outside
@@ -3362,6 +3464,10 @@ jobs:
       - name: platform watchdog gate
         run: ./verification/platform-watchdog-gate.sh
 
+      # Standalone readers only: no detector, host, or deployment integration.
+      - name: watchdog section reader suite
+        run: python3 -m unittest -v test_watchdog_sections
+
       # Mutation gate: planted defects must kill, survivors fail the step.
       - name: lost-probe mutation gate
         run: python3 verification/process-lost-mutation-gate.py
@@ -3427,6 +3533,8 @@ jobs:
             echo "::error::storage_auto_reclaim accepted a write-intent flag" >&2
             exit 1
           fi
+          cd ..
+          python3 -m unittest test_isolated_build_profile test_isolated_idle_ttl test_isolated_profile_matrix
 
       # GARM orphan/stale instance reaper audit on synthetic pool fixtures.
       # The audit is read-only by construction (pool-show reads only, no
@@ -3521,13 +3629,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           clean: true
 
       # Migrations snapshot for the validate_sql base-schema proof. The fork
       # repo is public, so no credential is needed (and none is provided).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: TogetherWeOwn/paperclip
           ref: 742aa11d332611e8aff16bb9c87a21b527a1cab1
@@ -3535,7 +3643,7 @@ jobs:
           sparse-checkout: packages/db/src/migrations
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -3594,7 +3702,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A suite that cannot fail is decoration. Each mutation step below
       # reintroduces a REAL past defect into a THROWAWAY COPY — never a tracked
@@ -4277,7 +4385,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # TOG-434. The rule: an action only a human can perform is a RUNBOOK
       # LINE; a judgement only the owner may make is a DECISION. Filed the
@@ -4376,7 +4484,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -4440,7 +4548,7 @@ jobs:
       run:
         working-directory: plugins/dispatch
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Node 24: the version the instance runs plugins on. `node --test`
       # semantics have moved between majors, so testing on another one would be
@@ -4586,7 +4694,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -4916,7 +5024,7 @@ jobs:
     outputs:
       impacted: ${{ steps.impact.outputs.impacted }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           clean: true
 
@@ -4966,7 +5074,7 @@ jobs:
       run:
         working-directory: plugins/model-selection
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           clean: true
 
@@ -5036,7 +5144,7 @@ jobs:
           esac
           echo "mutation gate: ok"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Node 24: the version the instance runs plugins on.
       - uses: actions/setup-node@v7
@@ -5094,7 +5202,7 @@ jobs:
       run:
         working-directory: plugins/cliproxy-insight
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Node 24: the version the instance runs plugins on.
       - uses: actions/setup-node@v7
@@ -5140,13 +5248,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Disclosure scan self-test
         run: bash scripts/test_disclosure_scan.sh
 
       - name: Plugin CI wiring self-test
         run: python3 scripts/test_plugin_ci_wiring.py
+
+      - name: Repo placement classifier self-test
+        run: python3 scripts/test_repo_placement.py
 
       - name: Disclosure scan over the full tracked tree
         run: bash scripts/disclosure-scan.sh .
@@ -5166,7 +5277,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -5174,10 +5285,11 @@ jobs:
         env:
           GITLEAKS_VERSION: '8.30.1'
           GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$RUNNER_TEMP/$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -H "Authorization: Bearer $GH_TOKEN" -o "$RUNNER_TEMP/$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
           echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
           sudo install -m 0755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks

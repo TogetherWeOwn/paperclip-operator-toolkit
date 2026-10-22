@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# test_breaker_cotenancy_probe.sh — offline suite for the TOG-833 breaker
+# test_breaker_cotenancy_probe.sh — offline suite for the breaker
 # co-tenancy probe.
 #
 # No gateway: the catalogue arrives through CATALOGUE_SOURCE_CMD, the same way

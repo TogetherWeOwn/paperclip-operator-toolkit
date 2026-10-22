@@ -1,0 +1,73 @@
+name: Review trigger
+
+# Paperclip Review is the FINAL review and runs exactly once per
+# ready head. This workflow fires when the CI workflow completes and, only
+# when `ci-ok` is green on a non-draft PR whose template checklist is
+# complete, requests one review of that exact head.
+#
+# Never reviewed: drafts, heads that already carry a success/failure Paperclip
+# Review verdict (incomplete runs never block a re-request in decide(); the
+# step allows one re-post per head after an error, further recovery belongs
+# to the reconciler), heads without ci-ok green.
+# Always invoked: release-please PRs and risky paths (security boundary,
+# flagged risk labels, over 600 changed lines), plus a deterministic 10%
+# audit sample. Risky/release-please heads need ci-ok green but not the
+# checklist; the review records missing boxes as findings.
+#
+# The decision lives in .github/scripts/review_trigger.py (stdlib only) and
+# is pinned by test_review_trigger.py; this file is glue (GitHub API reads
+# plus one idempotent comment). No model call, no Claude/Codex dependency.
+#
+# Trigger record: one `@togetherweown-reviewer review <sha>` comment plus a
+# `review-ready` label per head. The comment is the audit trail (only posts
+# authored by github-actions[bot] count; anyone can post the marker text on a
+# public repo); the label is the machine signal the bot invocation config
+# watches (see docs/review-trigger.md for the platform half). Both are
+# written at most once per head, plus one retry after an errored review: the
+# script skips reviewed heads, suppresses on a second bot marker, and
+# re-reads the head's check-runs just before posting so a live Paperclip
+# Review run started through another path (manual mention, gate listing, an
+# overlapping delivery) suppresses the post.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: write
+
+concurrency:
+  group: review-trigger-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  request-review:
+    name: Request one review per ready head
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The gate step shares the repo-root review_dedup.py (same-head
+          # idempotency, single source); cone mode cannot address a single
+          # root file, so this checkout is non-cone. Keep in sync with the
+          # template copy list in docs/review-trigger.md.
+          sparse-checkout: |
+            .github
+            ops/productivity
+            review_dedup.py
+          sparse-checkout-cone-mode: false
+
+      - name: Decide and request at most one review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/review_trigger_step.py

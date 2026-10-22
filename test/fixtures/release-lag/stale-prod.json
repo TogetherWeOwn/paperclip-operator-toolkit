@@ -1,0 +1,38 @@
+{
+  "_comment": "No successful production deploy in 8 days and no newer candidate either. Expect status=stale-prod, alert=true: silence is also drift.",
+  "now": "2026-10-19T03:00:00Z",
+  "prod_runs": [
+    {
+      "sha": "dddddddddddddddddddddddddddddddddddddddd",
+      "head_ts": "2026-10-11T08:00:00Z",
+      "created_at": "2026-10-11T08:05:00Z",
+      "updated_at": "2026-10-11T08:20:00Z",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 99,
+      "url": "https://example.invalid/runs/99"
+    },
+    {
+      "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "head_ts": "2026-10-18T08:00:00Z",
+      "created_at": "2026-10-18T08:05:00Z",
+      "updated_at": "2026-10-18T08:10:00Z",
+      "status": "completed",
+      "conclusion": "failure",
+      "number": 100,
+      "url": "https://example.invalid/runs/100"
+    }
+  ],
+  "staging_runs": [
+    {
+      "sha": "dddddddddddddddddddddddddddddddddddddddd",
+      "head_ts": "2026-10-11T08:00:00Z",
+      "created_at": "2026-10-11T07:30:00Z",
+      "updated_at": "2026-10-11T07:55:00Z",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 198,
+      "url": "https://example.invalid/runs/198"
+    }
+  ]
+}

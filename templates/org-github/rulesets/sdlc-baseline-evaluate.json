@@ -1,0 +1,44 @@
+{
+  "_comment": "TOG-24386 stage 1: org SDLC baseline ruleset, EVALUATE (advisory). Requires ci-ok + pr-lint by stable name on main across ALL repos except the injected exclude list; requires PR thread resolution. The Operator injects excludes from sdlc-foundation/repo-exclude-list.txt (runbook step 1), fills no other placeholder, creates it with the runbook commands, then flips to sdlc-baseline-active.json. Deliberately absent: merge queue (verified 2026-10-15: org-rules schema excludes the merge-queue rule type, HTTP 422 — stage 3 is the merge_queue_ready property + shared reconciler, TOG-24376) and Paperclip Review (requested only on ready heads after ci-ok green, TOG-19598 trigger). Reserved names for sibling tracks — required only when their producers exist, via the rename-trap procedure: size-label (TOG-24377), squawk-pg-lint (TOG-24379), test-missing (TOG-24380), security-scan (TOG-24381).",
+  "name": "sdlc-baseline",
+  "target": "branch",
+  "enforcement": "evaluate",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    },
+    "repository_name": {
+      "include": ["*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "required_status_checks": [
+          {
+            "context": "ci-ok",
+            "integration_id": 15368
+          },
+          {
+            "context": "pr-lint",
+            "integration_id": 15368
+          }
+        ],
+        "strict_required_status_checks_policy": false
+      }
+    },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_approving_review_count": 0,
+        "required_review_thread_resolution": true
+      }
+    }
+  ]
+}

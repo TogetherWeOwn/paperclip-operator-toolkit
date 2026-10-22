@@ -1,0 +1,41 @@
+# Blocker-ledger migration required wrapper (staged for TogetherWeOwn/.github).
+#
+# Thin wrapper so an org ruleset can require the WORKFLOW: it re-exports the
+# bare `migration` check from the reusable gate. Stays in warn mode until the
+# Operator flips the gate after measuring the false-positive rate. Never
+# hand-edit this file: fix upstream, then re-copy.
+
+name: Blocker migration required wrapper
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn (advisory, never fails) or enforce (findings fail the run)"
+        required: false
+        default: "warn"
+        type: string
+      dialect:
+        description: "auto (default) or an explicit postgres|sqlite|postgres-transactional pin (mixed repos pin postgres via the BLOCKER_MIGRATION_DIALECT repo variable; single-transaction forward-only Postgres runners pin postgres-transactional); unknown values are rejected"
+        required: false
+        default: "auto"
+        type: string
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  migration:
+    name: migration
+    uses: TogetherWeOwn/.github/.github/workflows/blocker-migration-gate.yml@3e82c42a1151f1fb333ffb59650a05bae1a7bec5 # repin to the adoption SHA
+    # On `pull_request` / `merge_group` the `workflow_call` inputs are
+    # empty, so a mixed repo pins its dialect with the
+    # `BLOCKER_MIGRATION_DIALECT` repo variable (set once to `postgres`
+    # or `sqlite`); an explicit caller `with:` still wins when present.
+    with:
+      mode: ${{ inputs.mode || 'warn' }}
+      dialect: ${{ inputs.dialect || vars.BLOCKER_MIGRATION_DIALECT || 'auto' }}
+    permissions:
+      contents: read

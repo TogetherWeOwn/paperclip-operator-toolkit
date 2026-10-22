@@ -1,7 +1,7 @@
 <!--
 Title: Conventional Commits header, e.g. `fix(auth): refuse expired sudo sessions`.
 Types: feat fix perf refactor test docs build ci chore revert style security. Max 100 chars.
-Keep the card ID out of the title; put it on the Refs line below.
+Keep tracker ids out of public title and body; link only public GitHub issues.
 -->
 
 ## Summary
@@ -16,4 +16,4 @@ Keep the card ID out of the title; put it on the Refs line below.
 
 <!-- Commands you ran and their results, or why no test applies. -->
 
-Refs: TOG-
+Refs: none (public repo, no tracker ids)

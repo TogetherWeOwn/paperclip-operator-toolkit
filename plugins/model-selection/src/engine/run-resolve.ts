@@ -367,6 +367,12 @@ export function resolveRunDecision(input: RunResolveInput): RunResolution {
   // answer"; `no-eligible-model`/`tier-exhausted` are "nothing may run": park.
   const unselected = (decision: SelectionDecision): RunResolution | null => {
     if (decision.outcome === "selected" && decision.modelId) return null;
+    // An exempt agent is never repinned, so when its own model is known
+    // unserviceable the only safe answer is to wait, not to start the run on a
+    // model that refuses it (the failed-run class this closes).
+    if (decision.exemptUnserviceable) {
+      return defer(`exempt agent's model ${decision.exemptUnserviceable.modelId} is unserviceable`, decision);
+    }
     if (decision.outcome === "held-at-floor" || decision.outcome === "disabled") {
       return { kind: "keep", reason: `${decision.outcome}: ${decision.trace[decision.trace.length - 1] ?? ""}` };
     }

@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # ===========================================================================
-# Regression suite for cliproxy_release_preflight.sh  (TOG-4054)
+# Regression suite for cliproxy_release_preflight.sh
 #
 # A refusing gate proves nothing on its own: a script that refuses everything
 # refuses correctly too. So every RED case below is paired with a GREEN

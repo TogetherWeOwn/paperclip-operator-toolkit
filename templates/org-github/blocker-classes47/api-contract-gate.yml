@@ -1,0 +1,132 @@
+# Blocker-ledger API-contract gate (staged for TogetherWeOwn/.github).
+#
+# Staged source: this whole `blocker-classes47/` directory lands in the org
+# `.github` repo (`api-contract-gate.yml` at `.github/workflows/`). An
+# Operator applies it there after the source PR merges; repin callers to the
+# adoption SHA at that point. Never hand-edit this file: fix upstream, then
+# re-copy.
+#
+# WHAT THIS IS. One reusable workflow every TogetherWeOwn repo opts into with
+# a single caller (`uses`) line (see ADOPTION.md next to this file). It runs the
+# deterministic API-contract checks (blocker-ledger class 5) BEFORE any
+# review model is involved: removed endpoints, newly-required request
+# fields, and removed required response fields.
+#
+# The repo declares its wire schema at `docs/api-schema.json` (endpoint key
+# `"METHOD /path"` mapping to `req_required` / `resp_required` field lists;
+# see ADOPTION.md). Without that file the gate reports its absence and
+# skips — adopting the schema is a follow-up, never a failure.
+#
+# REPORT-ONLY FIRST: `mode: warn` (the default) never fails the run for its
+# own findings — the job sets `continue-on-error` in warn mode and writes
+# findings to the step summary. Flip to `mode: enforce` once the
+# false-positive rate over the last 20 PRs measures under 5%.
+
+name: Blocker API-contract gate
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn (advisory, never fails) or enforce (findings fail the run)"
+        required: false
+        default: "warn"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  api-contract:
+    name: api-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ inputs.mode == 'warn' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the org gate logic (single source of truth)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: TogetherWeOwn/.github
+          # Org HEAD at staging time (resolves today); repin to the adoption
+          # SHA when the Operator lands the gate files there.
+          ref: 3e82c42a1151f1fb333ffb59650a05bae1a7bec5
+          path: .org-gate-logic
+          persist-credentials: false
+      - name: Run API-contract checks against the base schema
+        env:
+          GATE_MODE: ${{ inputs.mode }}
+          GATE_EVENT: ${{ github.event_name }}
+          GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          GATE_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$GATE_EVENT" == "pull_request" ]]; then
+            base="$GATE_PR_BASE"
+          elif [[ -n "${GATE_BEFORE:-}" && "$GATE_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            base="$GATE_BEFORE"
+          else
+            base="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
+          fi
+          # Whether the BASE commit declares the wire schema is recorded
+          # BEFORE any `{}` placeholder is written: testing `-s` on a
+          # file we just wrote `{}` into could never fire, so the
+          # no-schema skip below keys off `base_has_schema` instead.
+          base_has_schema=0
+          if [[ -n "$base" ]]; then
+            git cat-file -e "$base" || { echo "base not in local history; failing closed"; exit 1; }
+            if git show "$base:docs/api-schema.json" > /tmp/blocker-old-schema.json 2>/dev/null; then
+              base_has_schema=1
+            else
+              echo '{}' > /tmp/blocker-old-schema.json
+            fi
+          else
+            echo '{}' > /tmp/blocker-old-schema.json
+          fi
+          if [[ ! -e docs/api-schema.json && "$base_has_schema" == "0" ]]; then
+            echo "no docs/api-schema.json — skipping (adopt the wire schema to enable)"
+            exit 0
+          fi
+          { cat docs/api-schema.json 2>/dev/null || echo '{}'; } > /tmp/blocker-new-schema.json
+          # -I: ignore cwd so a PR-root module can never shadow stdlib.
+          GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
+          import json
+          import os
+          import sys
+          sys.path.insert(0, os.environ.get("GATE_LOGIC", ".org-gate-logic/blocker-classes47"))
+          from blocker_api_contract_checks import (
+              check_removed_endpoints,
+              check_required_request_fields_added,
+              check_response_fields_removed,
+          )
+          def _encode_workflow_command_data(value):
+              # GitHub workflow-command escaping: PR-controlled schema
+              # text must never emit a raw CR/LF that forges a second
+              # ::cmd:: line (or hides later annotations).
+              text = value if isinstance(value, str) else str(value)
+              return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          old = json.load(open("/tmp/blocker-old-schema.json", encoding="utf-8"))
+          new = json.load(open("/tmp/blocker-new-schema.json", encoding="utf-8"))
+          findings = (
+              check_removed_endpoints(old, new)
+              + check_required_request_fields_added(old, new)
+              + check_response_fields_removed(old, new)
+          )
+          if findings:
+              print("::warning::blocker-api-contract findings:")
+              for finding in findings:
+                  print("::warning::%s" % _encode_workflow_command_data(finding))
+          else:
+              print("blocker-api-contract: clean")
+          if findings and os.environ.get("GATE_MODE") == "enforce":
+              raise SystemExit(1)
+          PY
+      - name: Summarise findings
+        if: always()
+        env:
+          GATE_STATUS: ${{ job.status }}
+          GATE_MODE: ${{ inputs.mode }}
+        run: 'echo "### blocker-api-contract: $GATE_STATUS (mode $GATE_MODE)" >> "$GITHUB_STEP_SUMMARY"'

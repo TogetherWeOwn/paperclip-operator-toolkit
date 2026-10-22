@@ -3888,6 +3888,41 @@ const mutants = [
     to: "return !!exemptAgentIds && exemptAgentIds.includes(agentId as string);",
   },
   {
+    // Killed by: tests/exempt-defer.spec.ts; the mutant is: the run-scoped hook keeps (starts the run) when an exempt agent's own model is unserviceable.
+    name: "exempt-agent-unserviceable-defer-removed",
+    file: "src/engine/run-resolve.ts",
+    from: "    if (decision.exemptUnserviceable) {",
+    to: "    if (false && decision.exemptUnserviceable) {",
+  },
+  {
+    // Killed by: tests/exempt-defer.spec.ts; the mutant is: a published unavailable lane or cooldown no longer defers an exempt agent.
+    name: "exempt-agent-availability-read-dropped",
+    file: "src/engine/select.ts",
+    from: "        ownRead.state === \"unavailable\";\n      if (stopped) {",
+    to: "        false;\n      if (stopped) {",
+  },
+  {
+    // Killed by: tests/exempt-defer.spec.ts; the mutant is: a pace-engine hard stop no longer defers an exempt agent.
+    name: "exempt-agent-hard-stop-read-dropped",
+    file: "src/engine/select.ts",
+    from: "(paceActive && (exemptPaceUnserviceable(ledger, ownModel) || ",
+    to: "(paceActive && (false || ",
+  },
+  {
+    // Killed by: tests/exempt-defer.spec.ts; the mutant is: an active lane-outage override no longer defers an exempt agent.
+    name: "exempt-agent-outage-read-dropped",
+    file: "src/engine/select.ts",
+    from: "exemptPaceUnserviceable(ledger, ownModel) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, ownModel)",
+    to: "exemptPaceUnserviceable(ledger, ownModel) || false",
+  },
+  {
+    // Killed by: tests/exempt-defer.spec.ts; the mutant is: the pace gate fires even when the operator disabled all pace involvement.
+    name: "exempt-agent-pace-gate-fires-when-pacing-off",
+    file: "src/engine/select.ts",
+    from: "        (paceActive && (exemptPaceUnserviceable(ledger, ownModel) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, ownModel))) ||",
+    to: "        (true && (exemptPaceUnserviceable(ledger, ownModel) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, ownModel))) ||",
+  },
+  {
     // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: an exempt agent's new card is still classified.
     name: "exempt-agent-creation-guard-removed",
     file: "src/worker.ts",

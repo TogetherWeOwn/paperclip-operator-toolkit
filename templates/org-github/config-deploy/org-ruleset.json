@@ -1,0 +1,25 @@
+{
+  "name": "TogetherWeOwn config-deploy baseline",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": { "include": ["refs/heads/main"], "exclude": [] },
+    "repository_name": {
+      "include": ["*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          { "context": "config-deploy / config-deploy", "integration_id": 15368 }
+        ]
+      }
+    }
+  ],
+  "_note": "Apply only after the reusable workflow and checker are merged to TogetherWeOwn/.github, the caller placeholder is replaced with that commit SHA in every consumer, and the config-deploy / config-deploy check is verified. Exclusions are injected from the single repo-exclude-list.txt plus this toolkit (no caller here). This template adds no merge queue, no rename lock, and no unrelated branch-protection rules."
+}

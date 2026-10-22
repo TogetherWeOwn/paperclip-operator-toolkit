@@ -37,7 +37,8 @@
     "explicitly_ineligible": [
       "two-ephemeral",
       "two-selfhosted",
-      "two-isolated"
+      "two-isolated",
+      "two-build"
     ]
   },
   "migration_complete": false,

@@ -1,0 +1,30 @@
+{
+  "_comment": "TOG-24380 stage 1: org ruleset, EVALUATE (advisory) for the first 24h. The Operator fills REPO_ID_OF_DOT_GITHUB and PINNED_SHA, creates it with `gh api` (see templates/org-github/README.md), then flips to test-missing-required.json.",
+  "name": "test-missing-gate",
+  "target": "branch",
+  "enforcement": "evaluate",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    },
+    "repository_name": {
+      "include": ["~ALL"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "workflows",
+      "parameters": {
+        "workflows": [
+          {
+            "repository_id": "REPO_ID_OF_DOT_GITHUB",
+            "path": ".github/workflows/test-missing-required.yml",
+            "ref": "PINNED_SHA"
+          }
+        ]
+      }
+    }
+  ]
+}

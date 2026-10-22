@@ -152,6 +152,8 @@ class SourcePacketTests(unittest.TestCase):
         for key, value in [("execution_user", "0:0"), ("startup_user", "1000:1000"),
                            ("wrapper", "direct_cargo"),
                            ("pool", "new_pool"), ("compiler_paths", ["/host/gcc"]),
+                           ("compiler_paths", ["/usr/bin/cc", "/usr/bin/gcc", "/usr/bin/ld",
+                                               "/usr/bin/ar", "/usr/bin/pkg-config"]),
                            ("runtime_policy", "writable_app"), ("adoption", "accepted")]:
             with self.subTest(key=key):
                 r = carrier.parse(self.files["runtime-contract.json"])
@@ -161,6 +163,59 @@ class SourcePacketTests(unittest.TestCase):
                 f["runtime-contract.json"] = json.dumps(r).encode()
                 m["files"]["runtime-contract.json"] = hashlib.sha256(f["runtime-contract.json"]).hexdigest()
                 self.refuse(m, f, "runtime contract drift")
+
+    def test_wasm_llvm_pins_are_exact_and_minimal(self):
+        packages = carrier.parse(self.files["native-packages.json"])["packages"]
+        self.assertEqual(set(packages), {"binutils", "clang", "clang-19", "gcc", "gcc-14",
+                                         "libc6-dev", "llvm", "llvm-19", "pkg-config", "pkgconf"})
+        self.assertEqual({k: packages[k] for k in ("clang", "clang-19", "llvm", "llvm-19")},
+                         {"clang": "1:19.0-63", "clang-19": "1:19.1.7-3+b1",
+                          "llvm": "1:19.0-63", "llvm-19": "1:19.1.7-3+b1"})
+        recipe = self.files["Dockerfile"].decode()
+        for extra in ["lld", "wasi", "libclang-rt", "clang-tools", "llvm-19-dev", "g++", "rustc", "cargo"]:
+            self.assertNotIn(extra, recipe)
+
+    def test_rebound_packages_cannot_drop_or_add_llvm_authority(self):
+        for mutate in [lambda p: p.pop("clang"), lambda p: p.pop("llvm-19"),
+                       lambda p: p.update({"lld": "1:19.0-63"})]:
+            n = carrier.parse(self.files["native-packages.json"])
+            mutate(n["packages"])
+            self.rebind("native-packages.json", json.dumps(n).encode())
+            self.refuse(reason="native.packages")
+            self.setUp()
+
+    def test_wasm_object_evidence_runs_as_execution_user_only(self):
+        recipe = self.files["Dockerfile"].decode()
+        self.assertEqual(recipe.count("gosu "), 1)
+        check = recipe.split("RUN gosu 1000:1000 sh -eu -c '", 1)[1]
+        for needle in ["test -x /usr/bin/clang", "test -x /usr/bin/llvm-ar",
+                       "/usr/bin/clang --version", "/usr/bin/llvm-ar --version",
+                       "/usr/bin/clang --target=wasm32-unknown-unknown -ffreestanding -c",
+                       "0061736d", "/usr/bin/llvm-ar rc"]:
+            self.assertIn(needle, check)
+        self.assertNotIn("-o /", check)
+
+    def test_rebound_recipe_cannot_drop_wasm_object_evidence(self):
+        recipe = self.files["Dockerfile"]
+        for old, new in [(b"--target=wasm32-unknown-unknown", b"--target=x86_64-linux-gnu"),
+                         (b"0061736d", b"7f454c46"),
+                         (b" && test -x /usr/bin/clang && test -x /usr/bin/llvm-ar", b"")]:
+            with self.subTest(old=old):
+                self.assertIn(old, recipe)
+                self.files["Dockerfile"] = recipe.replace(old, new)
+                self.manifest["files"]["Dockerfile"] = hashlib.sha256(self.files["Dockerfile"]).hexdigest()
+                self.refuse(reason="recipe drift")
+
+    def test_wasm_check_script_is_valid_shell_syntax(self):
+        recipe = self.files["Dockerfile"].decode()
+        script = recipe.split("RUN gosu 1000:1000 sh -eu -c '", 1)[1].rsplit("'", 1)[0]
+        self.assertNotIn("'", script)
+        result = subprocess.run(["sh", "-n", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)  # parse only; nothing executes
+
+    def test_runtime_contract_lists_llvm_tool_paths(self):
+        contract = carrier.parse(self.files["runtime-contract.json"])
+        self.assertTrue({"/usr/bin/clang", "/usr/bin/llvm-ar"} <= set(contract["compiler_paths"]))
 
     def test_apt_trust_and_snapshot_drift_refused_even_if_rebound(self):
         self.rebind("native.sources", self.files["native.sources"].replace(

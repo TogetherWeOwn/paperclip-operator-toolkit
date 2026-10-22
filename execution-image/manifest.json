@@ -2,7 +2,7 @@
   "schema": "execution-image.source-packet.v1",
   "state": "unbuilt_recipe",
   "carrier_repository": "TogetherWeOwn/paperclip-operator-toolkit",
-  "carrier_base_revision": "5610702179ca2168730aa306f6af2db076c5ca41",
+  "carrier_base_revision": "999cf8ba855947182c692c95b3047f418a93058c",
   "base": {
     "image_ref": "ghcr.io/paperclipai/paperclip@sha256:95cc19e5fdd7804b9fd8699fbe33a7202ae6a26e2b42dc5e6fdf4785f213deed",
     "source_repository": "paperclipai/paperclip",
@@ -23,13 +23,13 @@
     "current_policy_acceptance": "UNESTABLISHED"
   },
   "files": {
-    "Dockerfile": "4ead497a6ccb03da3b9497a926ca7233181ed8e08ca8343f24997e0d5f4058b6",
-    "README.md": "23b26ad650764550ca0fc7254e2b6d9af7d4813b8b931563e9145910df2b5506",
-    "native-packages.json": "fd91eef15291329f84493ba7c7c4a8f73bd2c151d1d6fcc6d413b44dde0f2e8a",
+    "Dockerfile": "64a4896e5aa5b19ec19e2e8d0adb87b0dde015509eb935b676aa47fb391722ba",
+    "README.md": "4bb3a12e9366e76cba3e0c6d2521ea4fc69bc46519b9ed092b6b6f28efd1c8b1",
+    "native-packages.json": "ddad4860226a9761b3d9e71e0140ef73e86b4e466a21aeeed0a1881f67fb47b9",
     "native.sources": "c84c10319b74e1f6ab16ca7c17a7ce7d290478fe14511df504af9f7b67674186",
-    "runtime-contract.json": "39d7616fe9d73202742aef4aa79c7a41bccf3539b7cbdc05feb7cb65daca6ed7",
-    "test_manifest.py": "004371ce26bd0c1cddd747639130baabec1ca77eabb94fcd972f9dd7be86df0e",
-    "validate.py": "012d4f779b2f3b495997e72c1394f308c48ac151405ab1a8510a95a1b64944cd"
+    "runtime-contract.json": "8ff4d53b4eb4524f7ab3a4ca5581e5ee7bd292ab5a779dfaeeda1a173eecd336",
+    "test_manifest.py": "4a1885339e73c41a1fba172b4e2d552c4b74f380155a2d46bbcc7107e9181c7b",
+    "validate.py": "35c00832ae5befcbf4189b5f0f8b8e23a95b44a5f81e044e78f629c0c4949fb5"
   },
   "output": {
     "image_digest": null,

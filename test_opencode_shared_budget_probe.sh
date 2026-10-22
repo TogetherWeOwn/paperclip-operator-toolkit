@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# test_opencode_shared_budget_probe.sh — offline suite for the TOG-894 ask-2
+# test_opencode_shared_budget_probe.sh — offline suite for the ask-2 requirement of the
 # shared-budget probe.
 #
 # No gateway: every HTTP result arrives through OPENCODE_PROBE_CMD, the same
@@ -32,7 +32,7 @@
 #    cross-provider-control lesson; an in-namespace control cannot do it.
 #
 #  * A DETERMINISTIC 500 COUNTED AS CAPACITY. Section 5 feeds the
-#    gpt-5.6-luna-style upstream 500. TOG-845 filed that very response as a
+#    gpt-5.6-luna-style upstream 500. An earlier probe filed that very response as a
 #    missing-credential fault. It must land in OTHER, never in the throttle
 #    count, and must not by itself produce a verdict.
 #
@@ -196,7 +196,7 @@ fi
 # --------------------------------------------------------------------------
 sect "6. the throttle discriminator needs the routed-upstream prefix"
 # A bare "Missing API key" with NO [provider/model] [status] prefix is a real
-# local credential fault. Folding it into capacity is the original TOG-894
+# local credential fault. Folding it into capacity is the original
 # defect inverted, so it must land in OTHER.
 BARE="$(new_fixture bare.sh)"
 cat > "$BARE" <<SH
