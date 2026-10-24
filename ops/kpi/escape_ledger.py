@@ -27,7 +27,7 @@ import time
 import uuid
 
 UTC = dt.timezone.utc
-VERSION = 4
+VERSION = 5
 FIX = re.compile(r"(?<![a-z])(?:hotfix|fix)(?:es|ed|ing)?(?![a-z])", re.I)
 REVERT = re.compile(r"^\s*revert\b", re.I)
 REVERT_SHA = re.compile(r"\bthis reverts commit\s+([0-9a-f]{7,40})\b", re.I)
@@ -36,7 +36,7 @@ MERGE_MESSAGE = re.compile(r"^Merge pull request #([1-9][0-9]*)\b")
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", re.M)
 SHA = re.compile(r"[0-9a-f]{40}")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-RUN_ID = str(uuid.uuid4())
+RUN_ID = os.environ.get("INVOCATION_ID") or str(uuid.uuid4())
 ENTRY_POINT = "cli"
 
 
@@ -181,7 +181,7 @@ class GitHub:
           repository(owner:$owner,name:$name){defaultBranchRef{name} pullRequests(states:MERGED,first:100,
           after:$cursor,orderBy:{field:UPDATED_AT,direction:DESC}){
           pageInfo{hasNextPage endCursor} nodes{number title body url mergedAt updatedAt
-          headRefName headRefOid baseRefName mergeCommit{oid}}}}}"""
+          createdAt headRefName headRefOid baseRefName mergeCommit{oid}}}}}"""
         cursor, prs = None, {}
         while True:
             data = self.api("graphql", {"query": query, "variables": {
@@ -594,6 +594,131 @@ def aggregate(merges, events, repos, start, end):
     return rows
 
 
+def percentile(values, fraction):
+    """Linear interpolation, including single-sample populations."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    return round(ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower), 3)
+
+
+def quality_summary(metadata, merges, events):
+    """One mature-cohort guardrail, shared by the ledger and nightly scoreboard.
+
+    Escape is the existing linked incident/revert/hotfix proxy; rework is its
+    revert/hotfix subset. Never add the two numerators. No causal or statistical
+    non-inferiority claim follows from this descriptive observation.
+    """
+    start, end = instant(metadata["start"]), instant(metadata["end"])
+    if start >= end:
+        raise ValueError("invalid observation window")
+    repos = metadata["repos"]
+    if not repos or len(set(r.lower() for r in repos)) != len(repos) or any(
+            not REPO.fullmatch(r) for r in repos):
+        raise ValueError("invalid repository scope")
+    reasons = set()
+    if metadata.get("status") != "complete" or metadata.get("errors"):
+        reasons.add("collection_incomplete")
+    coverage = metadata.get("coverage", [])
+    by_repo = {r["repo"]: r for r in coverage}
+    if len(by_repo) != len(coverage) or set(by_repo) != set(repos):
+        reasons.add("coverage_missing")
+    for row in coverage:
+        if row.get("status") != "complete":
+            reasons.add("collection_incomplete")
+        for field in ("merges", "analyzed", "unlinked_fixes", "unresolved_revert_commits"):
+            if type(row.get(field)) is not int or row[field] < 0:
+                reasons.add("coverage_missing")
+        if row.get("unlinked_fixes", 0) or row.get("unresolved_revert_commits", 0):
+            reasons.add("linkage_incomplete")
+    if type(metadata.get("unlinked_incident_mentions")) is not int:
+        reasons.add("coverage_missing")
+    if metadata.get("unlinked_incident_mentions", 0):
+        reasons.add("linkage_incomplete")
+    index, cohort, spans = {}, {}, collections.defaultdict(list)
+    counts = collections.Counter()
+    for merge in merges:
+        repo, number, head = merge["repo"], merge["number"], merge["head"]
+        key = (repo, number)
+        at = instant(merge["mergedAt"])
+        if (repo not in repos or type(number) is not int or number < 1 or
+                not SHA.fullmatch(head) or not SHA.fullmatch(merge["merge_commit"]) or
+                not start <= at < end or key in index):
+            raise ValueError("invalid or duplicate merge identity")
+        index[key] = merge
+        counts[repo] += 1
+        if at + dt.timedelta(days=7) <= end:
+            cohort[key] = merge
+        opened = instant(merge["opened_at"]) if merge.get("opened_at") else None
+        if opened is not None and opened <= at:
+            spans["pr_open_to_merge"].append((at - opened).total_seconds())
+        review = merge.get("review", {})
+        completed = instant(review["completed_at"]) if review.get("completed_at") else None
+        if (completed is not None and review.get("reviewed_head") == head and completed <= at
+                and (opened is None or completed >= opened)):
+            spans["review_complete_to_merge"].append((at - completed).total_seconds())
+    for repo in repos:
+        row = by_repo.get(repo, {})
+        if row.get("merges") != counts[repo] or row.get("analyzed") != counts[repo]:
+            reasons.add("coverage_count_mismatch")
+    affected, seen = collections.defaultdict(dict), {}
+    for event in events:
+        event_id, kind = event["id"], event["kind"]
+        if (not isinstance(event_id, str) or not event_id or kind not in {"incident", "hotfix", "revert"}
+                or not isinstance(event.get("introducers"), list)):
+            raise ValueError("invalid event identity")
+        if event_id in seen:
+            if seen[event_id] != event:
+                raise ValueError("conflicting duplicate event")
+            continue
+        seen[event_id] = event
+        occurred = instant(event["at"])
+        if not start <= occurred < end:
+            continue
+        if not event["introducers"]:
+            reasons.add("linkage_incomplete")
+        for intro in event["introducers"]:
+            key = (intro["repo"], intro["number"])
+            if key not in cohort:
+                continue
+            merged = instant(cohort[key]["mergedAt"])
+            deadline = merged + dt.timedelta(days=7)
+            if kind == "incident" and event.get("time_precision") == "day":
+                # Day-granular notes cannot decide which side of a merge or
+                # seven-day cutoff they fall on. Do not silently guess midnight.
+                last = occurred + dt.timedelta(days=1)
+                if last <= merged or occurred > deadline:
+                    continue
+                if occurred <= merged or last > deadline or last > end:
+                    reasons.add("ambiguous_incident_time")
+                    continue
+            elif not merged < occurred <= deadline:
+                continue
+            affected[key][event_id] = kind
+    escaped = len(affected)
+    reworked = sum(any(k in {"hotfix", "revert"} for k in links.values()) for links in affected.values())
+    n = len(cohort)
+    measured = not reasons and n > 0
+    return {"schema_version": 1, "definition": "unique_merged_prs_linked_to_proxy_within_7_days",
+            "mode": "shadow", "start": stamp(start), "end": stamp(end), "maturity_days": 7,
+            "coverage_status": "partial" if reasons else "complete", "reasons": sorted(reasons),
+            "n": n, "immature_n": len(index) - n, "escape_n": escaped, "rework_n": reworked,
+            "affected_n": escaped, "escape_rate": escaped / n if measured else None,
+            "rework_rate": reworked / n if measured else None,
+            "escape_rework_rate": escaped / n if measured else None,
+            "stage_waits": {name: {"n": len(spans[name]), "missing_n": len(index) - len(spans[name]),
+                                    "p50_seconds": percentile(spans[name], 0.5),
+                                    "p90_seconds": percentile(spans[name], 0.9)}
+                            for name in ("pr_open_to_merge", "review_complete_to_merge")},
+            "affected_merges": [{"repo": repo, "number": number, "head": cohort[(repo, number)]["head"],
+                                 "merge_commit": cohort[(repo, number)]["merge_commit"],
+                                 "event_ids": sorted(links), "kinds": sorted(set(links.values()))}
+                                for (repo, number), links in sorted(affected.items())]}
+
+
 def render(metadata, rows, events, unlinked):
     text = ["# Shadow escape ledger", "", f"Generated: {metadata['generated_at']}",
             f"Window: [{metadata['start']}, {metadata['end']}) UTC.",
@@ -617,6 +742,17 @@ def render(metadata, rows, events, unlinked):
             "", "## Per-repository baseline", "",
             "| Repo | Merges | Merges/day | Reverts | Hotfixes | Incidents | Proxies/100 merges |",
             "|---|---:|---:|---:|---:|---:|---:|"]
+    quality = metadata.get("quality")
+    if quality:
+        rate = quality["escape_rework_rate"]
+        text[5:5] = ["", "## Single quality guardrail", "",
+                     f"Escape/rework proxy: {100 * rate:.2f}%" if rate is not None else "Escape/rework proxy: N/A",
+                     f"Affected merged PRs: {quality['affected_n']}; n={quality['n']} mature merges; "
+                     f"immature={quality['immature_n']}; coverage={quality['coverage_status']}.",
+                     "Seven-day introducer cohort; unique affected merges, not event counts. "
+                     "Rework (revert/hotfix) is a subset of escape proxies, never additive. "
+                     "Legacy occurrence-date rates below are a different metric. "
+                     "See the nightly scoreboard for measured spans and missing samples."]
     for repo in [*metadata["repos"], "ALL"]:
         selected = [r for r in rows if r["period"] == "day" and r["repo"] == repo]
         values = {k: sum(r[k] for r in selected) for k in ("merges", "reverts", "hotfixes", "incidents", "escapes")}
@@ -686,6 +822,7 @@ def run(args):
                 for pr in window:
                     merges.append({"type": "merge", "repo": repo, "number": pr["number"],
                                    "mergedAt": pr["mergedAt"], "head": pr["headRefOid"],
+                                   "opened_at": pr.get("createdAt"),
                                    "merge_commit": (pr.get("mergeCommit") or {}).get("oid"),
                                    "review": review_status(pr, reviews.get((repo.lower(), pr["number"]), []))})
                 # Direct pushes can revert an older PR even with no window merges.
@@ -802,6 +939,7 @@ def run(args):
                     "kinds": dict(collections.Counter(e["kind"] for e in events)),
                     "unlinked_incident_mentions": len(unlinked),
                     "escapes_per_100_merges": 100 * len(events) / len(merges) if merges and not errors else None}
+        metadata["quality"] = quality_summary(metadata, merges, events)
         records = [metadata, *merges, *events, *rows,
                    *[dict(e, type="unlinked_incident") for e in unlinked]]
         # Each file is atomic; matching run_id/timestamp identifies a crash between the two renames.

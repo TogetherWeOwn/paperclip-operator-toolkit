@@ -130,3 +130,6 @@ ops/kpi/ESCAPES.md
 ops/kpi/.escape-cache/
 ops/kpi/escape-history/
 ops/kpi/.escape-ledger.lock
+ops/kpi/quality-scoreboard.json
+ops/kpi/owner-inbox-line.txt
+ops/kpi/.quality-scoreboard.lock
