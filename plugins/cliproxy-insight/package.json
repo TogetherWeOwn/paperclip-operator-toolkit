@@ -19,11 +19,16 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "node --test scripts/tinypool-security-regression.mjs && vitest run",
     "verify": "npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
     "@paperclipai/plugin-sdk": "2026.824.1"
+  },
+  "overrides": {
+    "vitest": {
+      "tinypool": "2.1.2"
+    }
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
