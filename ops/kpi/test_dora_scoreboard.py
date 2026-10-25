@@ -121,6 +121,32 @@ class Scoreboard(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertEqual(data["error"]["code"], "INVALID_SNAPSHOT")
 
+    def test_degraded_collector_snapshot_replaces_healthy_scoreboard_with_unavailable(self):
+        """Preserving partial legacy rows must not weaken scoreboard validation."""
+        for change in ({"merge_commit": None}, {"head": None},
+                       {"merge_commit": "sensitive-value"}, {"head": "sensitive-value"},
+                       {"opened_at": "sensitive-value"},
+                       {"review": {"completed_at": "sensitive-value"}}):
+            with self.subTest(change=change):
+                self.meta, self.merges, self.events = fixture()
+                self.meta.update(type="metadata", tool_sha256="b" * 64)
+                self.write()
+                self.assertEqual(self.run_cli()[0], 0)
+                self.merges[0].update(change)
+                self.meta.update(quality=None, status="partial", errors=["quality summary unavailable"])
+                self.source.write_text("".join(json.dumps(r) + "\n" for r in
+                                               [self.meta, *self.merges, *self.events]))
+                rc, data = self.run_cli()
+                self.assertEqual(rc, 2)
+                self.assertEqual(data["status"], "unavailable")
+                self.assertEqual(data["error"]["code"], "INVALID_SNAPSHOT")
+                saved = json.loads((self.out / "quality-scoreboard.json").read_text())
+                self.assertEqual(saved, data)
+                self.assertNotIn("sensitive-value", json.dumps(saved))
+                text = (self.out / "owner-inbox-line.txt").read_text()
+                self.assertIn("UNAVAILABLE", text)
+                self.assertNotIn("50.00%", text)
+
     def test_systemd_rejects_another_invocation_even_if_snapshot_is_fresh(self):
         with patch.dict(os.environ, {"INVOCATION_ID": "new-run"}):
             rc, data = self.run_cli("--entry-point", "systemd")

@@ -44,6 +44,13 @@ The original daily/weekly occurrence-date `escapes_per_100_merges` is preserved
 for compatibility. It counts events, can exceed 100, and is **not** this cohort
 metric. Do not mix these rates or add rework to escape.
 
+If a degraded merge identity or timestamp prevents summary validation, the
+collector still publishes the current legacy observations with `status=partial`
+and `quality=null`. Aggregate rates are suppressed, a sanitized diagnostic is
+recorded, and completed historical snapshots are preserved. The scoreboard
+independently validates these rows and publishes `UNAVAILABLE` rather than
+reusing a healthy spool or treating the absent summary as a zero rate.
+
 ## Measured spans, not inferred queue times
 
 The summary's `stage_waits` contains p50/p90 seconds (linear interpolation), `n`

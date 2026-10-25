@@ -939,7 +939,18 @@ def run(args):
                     "kinds": dict(collections.Counter(e["kind"] for e in events)),
                     "unlinked_incident_mentions": len(unlinked),
                     "escapes_per_100_merges": 100 * len(events) / len(merges) if merges and not errors else None}
-        metadata["quality"] = quality_summary(metadata, merges, events)
+        try:
+            metadata["quality"] = quality_summary(metadata, merges, events)
+        except (ValueError, TypeError, KeyError):
+            # Preserve legacy observations without relaxing the scoreboard's
+            # independent validation of the same degraded records.
+            metadata["quality"] = None
+            errors.append("quality summary unavailable: invalid merge or event data")
+            metadata["status"] = "partial"
+            metadata["escapes_per_100_merges"] = None
+            for row in rows:
+                row["coverage_status"] = "partial"
+                row["escapes_per_100_merges"] = None
         records = [metadata, *merges, *events, *rows,
                    *[dict(e, type="unlinked_incident") for e in unlinked]]
         # Each file is atomic; matching run_id/timestamp identifies a crash between the two renames.
