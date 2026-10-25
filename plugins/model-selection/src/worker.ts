@@ -225,6 +225,12 @@ import {
   resolveClassifiedTiers,
   RUBRIC,
 } from "./engine/classify.js";
+import { baselineTierForIssue } from "./engine/classify-baseline.js";
+import {
+  driftActive,
+  parseShadowWindow,
+  recordShadowOutcome,
+} from "./engine/classifier-shadow.js";
 import {
   selectDispatch,
   summariseRoutingGap,
@@ -902,6 +908,57 @@ export function createPlugin() {
           if (typeof tier === "string" && (TIERS as readonly string[]).includes(tier)) out[issueId] = tier as Tier;
         }
         return out;
+      };
+
+      const classifierShadowKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.classifierShadow,
+      });
+
+      /**
+       * Baseline shadow for one landed classification (report-only). Runs the
+       * deterministic anchor baseline over the same title/description the
+       * classifier saw, appends the {classifier, baseline, agreement} pair to
+       * the bounded rolling window, and returns the additive activity-metadata
+       * fields. Returns null when shadowing is off — and degrades to null on
+       * any state error, so telemetry can never fail a classify row.
+       */
+      const recordClassifierShadow = async (
+        companyId: string,
+        classification: {
+          baselineMode: string;
+          descriptionChars: number;
+          driftMinN: number;
+          driftT1Share: number;
+        },
+        title: string,
+        description: string | null,
+        classifierTier: Tier,
+      ): Promise<{
+        baseline: "T2" | "T3" | null;
+        baselineRule: string | null;
+        baselineAgrees: boolean | null;
+        classifierDrift: boolean;
+      } | null> => {
+        if (classification.baselineMode !== "shadow") return null;
+        try {
+          const baseline = baselineTierForIssue(title, description, classification.descriptionChars);
+          const window = recordShadowOutcome(parseShadowWindow(await ctx.state.get(classifierShadowKey(companyId))), {
+            t: classifierTier,
+            b: baseline?.tier ?? null,
+            a: baseline === null ? null : baseline.tier === classifierTier,
+          });
+          await ctx.state.set(classifierShadowKey(companyId), window);
+          return {
+            baseline: baseline?.tier ?? null,
+            baselineRule: baseline?.rule ?? null,
+            baselineAgrees: baseline === null ? null : baseline.tier === classifierTier,
+            classifierDrift: driftActive(window, classification.driftMinN, classification.driftT1Share),
+          };
+        } catch {
+          return null;
+        }
       };
 
       const readCardLedger = async (companyId: string): Promise<Record<string, CardLedgerEntry>> => {
@@ -5034,6 +5091,9 @@ export function createPlugin() {
                   exclusions[issueId] = true;
                 }
 
+                // Baseline shadow (report-only): evidence only, never a decision.
+                const shadow = await recordClassifierShadow(company.id, config.classification, title, description, labelTier);
+
                 await ctx.activity.log({
                   companyId: company.id,
                   message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${judgement.exclusion ? ", capability-excluded" : ""}${isForeignLabel ? `, replacing an unattributed ${existingLabelTier} label` : ""}`,
@@ -5045,6 +5105,14 @@ export function createPlugin() {
                     confidence: judgement.confidence,
                     reason: judgement.reason,
                     ...(isForeignLabel ? { replacedLabelTier: existingLabelTier } : {}),
+                    ...(shadow === null
+                      ? {}
+                      : {
+                          baseline: shadow.baseline,
+                          baselineRule: shadow.baselineRule,
+                          baselineAgrees: shadow.baselineAgrees,
+                          classifierDrift: shadow.classifierDrift,
+                        }),
                   },
                 });
                 classified += 1;
