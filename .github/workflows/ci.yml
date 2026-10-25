@@ -330,7 +330,7 @@ on:
 # Everything else stays at the default deny.
 permissions:
   contents: read
-  actions: read
+  actions: read # Let the offline/runbook reporters read this run's job steps.
 
 # Cancel a superseded run on the same ref rather than letting it burn the full
 # ~70min Offline-suites job to completion. Keyed on PR number when present so
@@ -378,6 +378,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 0
       - id: detect
         env:
@@ -499,6 +500,8 @@ jobs:
           echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
           echo "ORGDB_PGDATA=$PGDATA" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install Postgres client and jq
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # latest (resolved 2026-10-25)
         with:
@@ -673,6 +676,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           clean: true
+          persist-credentials: false
           # The static-label guard below compares complete workflow selectors
           # between base and head; a shallow checkout has no base to compare.
           fetch-depth: 0
@@ -703,6 +707,11 @@ jobs:
         env:
           PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
         run: python3 scripts/test_action_pins.py
+
+      - name: Workflow hardening regression controls
+        env:
+          PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
+        run: python3 scripts/test_workflow_hardening.py
 
       # The comparison lives in required Offline suites, not an optional
       # standalone workflow.
@@ -1785,7 +1794,7 @@ jobs:
 
           # 23. Listing job steps must stay within the read-only Actions grant.
           dark_mutation "actions-read-permission-dropped" .github/workflows/ci.yml \
-            's/^  actions: read$/  actions: write/' \
+            's/^  actions: read.*/  actions: write/' \
             'the workflow grants actions: read for the live reporter' || rc=1
 
           # 24. Silence both rejection paths to exercise false-dark completed/null data.
@@ -3639,6 +3648,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           clean: true
+          persist-credentials: false
 
       # Migrations snapshot for the validate_sql base-schema proof. The fork
       # repo is public, so no credential is needed (and none is provided).
@@ -3710,6 +3720,8 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # A suite that cannot fail is decoration. Each mutation step below
       # reintroduces a REAL past defect into a THROWAWAY COPY — never a tracked
@@ -4393,6 +4405,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # TOG-434. The rule: an action only a human can perform is a RUNBOOK
       # LINE; a judgement only the owner may make is a DECISION. Filed the
@@ -4492,6 +4506,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -4556,6 +4572,8 @@ jobs:
         working-directory: plugins/dispatch
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # Node 24: the version the instance runs plugins on. `node --test`
       # semantics have moved between majors, so testing on another one would be
@@ -4702,6 +4720,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -5034,6 +5054,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           clean: true
+          persist-credentials: false
 
       # Node 24: the same runtime the sweep uses. The script imports only node
       # builtins and the gate runtime, so there is no install step here.
@@ -5084,6 +5105,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           clean: true
+          persist-credentials: false
 
       # Node 24: the version the instance runs plugins on.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -5152,6 +5174,8 @@ jobs:
           echo "mutation gate: ok"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # Node 24: the version the instance runs plugins on.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -5210,6 +5234,8 @@ jobs:
         working-directory: plugins/cliproxy-insight
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # Node 24: the version the instance runs plugins on.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -5256,6 +5282,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Disclosure scan self-test
         run: bash scripts/test_disclosure_scan.sh
@@ -5286,6 +5314,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Install gitleaks
@@ -5337,9 +5366,11 @@ jobs:
       contents: read
     steps:
       - name: Summarize failed jobs
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
-          echo '${{ toJSON(needs) }}' | python3 -c "import json,sys; [print(k, '=', v.get('result')) for k, v in json.load(sys.stdin).items()]"
+          printf '%s\n' "$NEEDS_JSON" | python3 -c "import json,sys; [print(k, '=', v.get('result')) for k, v in json.load(sys.stdin).items()]"
 
   # One required check. Failure/cancellation of a needed job must fail closed;
   # intentional change-gated skips are accepted only after change detection.
@@ -5366,23 +5397,27 @@ jobs:
       - model-selection-suite
     steps:
       - name: Aggregate gated results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DISCLOSURE_RESULT: ${{ needs.disclosure-scan.result }}
+          SECRET_RESULT: ${{ needs.secret-scan.result }}
+          FAILED: ${{ contains(needs.*.result, 'failure') }}
+          CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
         run: |
           set -euo pipefail
-          if [ '${{ needs.changes.result }}' != 'success' ]; then
+          if [ "$CHANGES_RESULT" != 'success' ]; then
             echo "::error::change detection did not succeed"
             exit 1
           fi
           # The two scans are never change-gated. A skipped scan is not a pass:
           # it means someone re-gated them, so refuse rather than read it green.
-          for scan in disclosure-scan:'${{ needs.disclosure-scan.result }}' secret-scan:'${{ needs.secret-scan.result }}'; do
+          for scan in disclosure-scan:"$DISCLOSURE_RESULT" secret-scan:"$SECRET_RESULT"; do
             if [ "${scan#*:}" != "success" ]; then
               echo "::error::always-on scan ${scan%%:*} did not succeed (result: ${scan#*:})"
               exit 1
             fi
           done
-          failed="${{ contains(needs.*.result, 'failure') }}"
-          cancelled="${{ contains(needs.*.result, 'cancelled') }}"
-          if [ "$failed" = "true" ] || [ "$cancelled" = "true" ]; then
+          if [ "$FAILED" = "true" ] || [ "$CANCELLED" = "true" ]; then
             echo "::error::a needed job failed or was cancelled"
             exit 1
           fi

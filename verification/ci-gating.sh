@@ -200,9 +200,16 @@ for cmd in ("./test_sdlc_foundation_placement.sh",
 
 # A deleted contract cannot assert its own wiring. Check from this separately
 # executed gate as well, not just from the pinning test itself.
-check("offline-suites executes the immutable Action contract",
-      re.search(r"(?m)^        run: python3 scripts/test_action_pins\.py$",
-                bodies.get("offline-suites", "")) is not None)
+for title, command in (
+        ("Immutable Action references and red/green controls", "python3 scripts/test_action_pins.py"),
+        ("Workflow hardening regression controls", "python3 scripts/test_workflow_hardening.py")):
+    step = re.search(r"(?ms)^      - name: " + re.escape(title)
+                     + r"\n(?P<body>.*?)(?=^      - |\Z)", bodies.get("offline-suites", ""))
+    body = step.group("body") if step else ""
+    check(f"offline-suites executes {command}",
+          re.search(r"(?m)^        run: " + re.escape(command) + r"$", body) is not None)
+    check(f"{title} cannot skip or swallow failures",
+          step is not None and re.search(r"(?m)^        (if|continue-on-error):", body) is None)
 
 # The drain keeps describing red runs; it must not become a required gate.
 drain = bodies.get("failure-log-drain")

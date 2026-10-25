@@ -13,8 +13,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
-  issues: write
 
 concurrency:
   group: release-lag-${{ github.ref }}
@@ -23,6 +21,10 @@ concurrency:
 jobs:
   monitor:
     name: monitor
+    permissions:
+      contents: read
+      actions: read # Read deployment jobs to measure release lag.
+      issues: write # Maintain this repository's deduplicated lag alerts and digest.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
