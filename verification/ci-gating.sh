@@ -198,6 +198,12 @@ for cmd in ("./test_sdlc_foundation_placement.sh",
             "./templates/org-github/tests/test_sdlc_foundation.sh"):
     check(f"ci.yml executes {cmd}", cmd in noncomment)
 
+# A deleted contract cannot assert its own wiring. Check from this separately
+# executed gate as well, not just from the pinning test itself.
+check("offline-suites executes the immutable Action contract",
+      re.search(r"(?m)^        run: python3 scripts/test_action_pins\.py$",
+                bodies.get("offline-suites", "")) is not None)
+
 # The drain keeps describing red runs; it must not become a required gate.
 drain = bodies.get("failure-log-drain")
 check("failure-log-drain exists", drain is not None)

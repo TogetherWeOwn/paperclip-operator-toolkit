@@ -167,5 +167,9 @@ mutate sdlc-step-deleted '          ./test_sdlc_foundation_placement.sh
           ./templates/org-github/tests/test_sdlc_foundation.sh' '          echo "sdlc_foundation step deleted"'
 expect_fail sdlc-step-deleted "$MUTANT_FILE"
 
+# A contract removed from CI never runs its own self-check.
+mutate action-pin-step-deleted '        run: python3 scripts/test_action_pins.py' '        run: echo "Action pin contract deleted"'
+expect_fail action-pin-step-deleted "$MUTANT_FILE"
+
 printf '%s passed, %s failed\n' "$pass" "$fail"
 (( fail == 0 ))

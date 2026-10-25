@@ -376,7 +376,7 @@ jobs:
     outputs:
       heavy: ${{ steps.detect.outputs.heavy }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - id: detect
@@ -498,9 +498,9 @@ jobs:
           "$PGBIN/createdb" -h 127.0.0.1 -p "$PGPORT" -U "$PGUSER" "$PGDATABASE"
           echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
           echo "ORGDB_PGDATA=$PGDATA" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Postgres client and jq
-        uses: awalsh128/cache-apt-pkgs-action@latest
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # latest (resolved 2026-10-25)
         with:
           packages: postgresql-client jq
           version: 1.0
@@ -670,14 +670,14 @@ jobs:
           [[ "${RUNNER_ARCH:-}" == X64 ]]
           printf 'runner: name=%s os=%s arch=%s\n' "${RUNNER_NAME:-unknown}" "$RUNNER_OS" "$RUNNER_ARCH"
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           clean: true
           # The static-label guard below compares complete workflow selectors
           # between base and head; a shallow checkout has no base to compare.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '20'
 
@@ -696,6 +696,13 @@ jobs:
             --only-binary=:all: --no-deps --require-hashes \
             --target "$RUNNER_TEMP/static-label-guard-deps" \
             -r scripts/static-label-guard-requirements.txt
+
+      # Reuse the isolated, hash-pinned parser. Workflow changes always admit
+      # Offline suites, so a mutable Action ref cannot hide behind docs gating.
+      - name: Immutable Action references and red/green controls
+        env:
+          PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
+        run: python3 scripts/test_action_pins.py
 
       # The comparison lives in required Offline suites, not an optional
       # standalone workflow.
@@ -2263,7 +2270,7 @@ jobs:
       #
       # The suite builds its own scratch git repo and its own audit ref, so it
       # needs neither `origin/main` nor any remote branch. That is deliberate:
-      # actions/checkout@v7 clones --depth=1 --single-branch, and an earlier
+      # actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 clones --depth=1 --single-branch, and an earlier
       # revision that pinned fixtures to real refs would have been a
       # permanently red step that never once scored a mutant.
       # Pin-conformance and fork-disclosure gates whose subjects live outside
@@ -3546,7 +3553,7 @@ jobs:
       # gh-event-capture's suites run on 24 (validated there; the unit also
       # supports the pinned 20). The rest of this job stays on the pinned
       # 20 it was validated against.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
 
@@ -3557,7 +3564,7 @@ jobs:
       - name: work supply shadow kernel suites
         run: node --test plugins/work-supply/test/*.test.mjs
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '20'
 
@@ -3629,13 +3636,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           clean: true
 
       # Migrations snapshot for the validate_sql base-schema proof. The fork
       # repo is public, so no credential is needed (and none is provided).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: TogetherWeOwn/paperclip
           ref: 742aa11d332611e8aff16bb9c87a21b527a1cab1
@@ -3643,7 +3650,7 @@ jobs:
           sparse-checkout: packages/db/src/migrations
           persist-credentials: false
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
 
@@ -3653,7 +3660,7 @@ jobs:
       # The embedded node resolver in effective-build-check executes under
       # the installed Node; the capture slice already proved job-pinned
       # Node 20 is the wrong runtime for ported suites that need newer.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
 
@@ -3702,7 +3709,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # A suite that cannot fail is decoration. Each mutation step below
       # reintroduces a REAL past defect into a THROWAWAY COPY — never a tracked
@@ -4385,7 +4392,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # TOG-434. The rule: an action only a human can perform is a RUNBOOK
       # LINE; a judgement only the owner may make is a DECISION. Filed the
@@ -4484,9 +4491,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
 
@@ -4548,12 +4555,12 @@ jobs:
       run:
         working-directory: plugins/dispatch
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Node 24: the version the instance runs plugins on. `node --test`
       # semantics have moved between majors, so testing on another one would be
       # testing a different program than the one installed.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
           cache: npm
@@ -4694,9 +4701,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
 
@@ -5024,13 +5031,13 @@ jobs:
     outputs:
       impacted: ${{ steps.impact.outputs.impacted }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           clean: true
 
       # Node 24: the same runtime the sweep uses. The script imports only node
       # builtins and the gate runtime, so there is no install step here.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
 
@@ -5074,12 +5081,12 @@ jobs:
       run:
         working-directory: plugins/model-selection
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           clean: true
 
       # Node 24: the version the instance runs plugins on.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
           cache: npm
@@ -5144,10 +5151,10 @@ jobs:
           esac
           echo "mutation gate: ok"
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Node 24: the version the instance runs plugins on.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
           cache: npm
@@ -5202,10 +5209,10 @@ jobs:
       run:
         working-directory: plugins/cliproxy-insight
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Node 24: the version the instance runs plugins on.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
           cache: npm
@@ -5248,7 +5255,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Disclosure scan self-test
         run: bash scripts/test_disclosure_scan.sh
@@ -5277,7 +5284,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
