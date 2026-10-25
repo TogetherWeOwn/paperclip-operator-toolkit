@@ -184,7 +184,6 @@ Three tiers, by what each suite needs to run: nothing, an API key, or the VPS.
 
 ```bash
 # Offline — no credentials, no network, no database. These are what CI runs.
-./test_gh_app_token.sh              # credential-minter regression suite
 ./test_gh_token_argv.sh             # gh_token.sh: no credential on argv
 ./test_gh_token_dispatch.sh         # gh_token.sh: unknown subcommands refuse, non-zero
 ./test_gh_token_api_body.sh         # gh_token.sh: `api` sends the body AS the body, not on argv
@@ -408,16 +407,18 @@ cycles. It cannot replace `test_request_queue.sh`, because it stubs the provisio
 writes to the database, and it cannot run in CI, because it needs a company. Run it before
 declaring the request flow good in a given company, and after any org restructuring.
 
-`test_gh_app_token.sh` needs `node` and nothing else. It fabricates its whole credential environment:
-a throwaway RSA key generated per run, a stub GitHub API on `127.0.0.1`, and token-shaped canaries
-that are not real tokens. It invokes the tool under `env -i`, so a live `GH_APP_PRIVATE_KEY` exported
-in your shell cannot leak into a test run. Nothing it writes leaves `mktemp -d`.
+The per-call agent minter and its `test_gh_app_token.sh` suite are retired. Do not restore them to
+run this tier. The surviving host-operator `gh_token.sh` suites listed above use fake credentials
+and a stub API; agents continue to authenticate through the Paperclip built-in GitHub connection.
 
-`test_sql_backend.sh` needs `bash` and nothing else. It tests a dispatcher — which command
-`lib/pcsql.sh` builds, and what lands on that command's `argv` — so it puts *recording fakes* for
-`podman` and `psql` on `PATH` rather than requiring either. Fake, do not skip: a suite that skips
-the psql path when `psql` is absent passes on every runner in the world while that path is broken.
-Both fakes are always present, so both backends always execute.
+`test_sql_backend.sh` needs `bash`, `jq` (for the `skills.sh` startup check), and standard Unix
+utilities, but no real SQL backend. It tests a dispatcher — which command `lib/pcsql.sh` builds,
+and what lands on that command's `argv` — so it puts *recording fakes* for `podman` and `psql` on
+`PATH` rather than requiring either. Fake, do not skip: a suite that skips the psql path when
+`psql` is absent passes on every runner in the world while that path is broken. Both fakes are
+always present, so both backends always execute. The `skills.sh show` probe runs with an explicit
+fixture-only environment: inherited credentials, libpq overrides and shell startup hooks must not
+replace its connection settings or hide the recording fakes.
 
 If you touch `lib/pcsql.sh`, the two mutations CI runs against it are the ones to keep working:
 passing `$DATABASE_URL` to `psql` instead of decomposing it into `PG*` (which publishes the database
