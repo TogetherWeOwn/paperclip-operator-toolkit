@@ -960,3 +960,80 @@ describe(" creation-time pin in advisory selection", () => {
     });
   }
 });
+
+describe("creation-pin baseline shadow (report-only)", () => {
+  async function shadowState(harness: Awaited<ReturnType<typeof boot>>) {
+    return harness.ctx.state.get({
+      scopeKind: "company",
+      scopeId: COMPANY,
+      stateKey: PLUGIN_STATE_KEYS.classifierShadow,
+    } as never);
+  }
+
+  function shadowConfig(overrides: Record<string, unknown> = {}) {
+    return baseConfig({
+      classification: {
+        enabled: true,
+        baseUrl: "https://api.anthropic.example.com",
+        modelId: "claude-sonnet-5",
+        ...overrides,
+      },
+    });
+  }
+
+  it("records agreement on the creation path, changing nothing", async () => {
+    const card = issue("i1", { title: "Review PR #1234 against the written criteria" });
+    const harness = await boot(shadowConfig(), [card]);
+    stubClassifier(harness, "T2");
+
+    await harness.emit("issue.created", { title: card.title }, { entityId: "i1", companyId: COMPANY, entityType: "issue" });
+
+    expect((await harness.ctx.issues.get("i1", COMPANY))?.labelIds).toContain("lbl-T2");
+    const notice = harness.activity.find((entry) => entry.message.includes("at card creation"));
+    expect(notice?.metadata?.baseline).toBe("T2");
+    expect(notice?.metadata?.baselineRule).toBe("named-review");
+    expect(notice?.metadata?.baselineAgrees).toBe(true);
+    expect(notice?.metadata?.classifierDrift).toBe(false);
+    expect(await shadowState(harness)).toEqual({
+      outcomes: [{ t: "T2", b: "T2", a: true }],
+    });
+  });
+
+  it("records disagreement without overriding the classifier", async () => {
+    const card = issue("i1", { title: "Review PR #1234 against the written criteria" });
+    const harness = await boot(shadowConfig(), [card]);
+    stubClassifier(harness, "T1");
+
+    await harness.emit("issue.created", { title: card.title }, { entityId: "i1", companyId: COMPANY, entityType: "issue" });
+
+    expect((await harness.ctx.issues.get("i1", COMPANY))?.labelIds).toContain("lbl-T1");
+    const notice = harness.activity.find((entry) => entry.message.includes("at card creation"));
+    expect(notice?.metadata?.baseline).toBe("T2");
+    expect(notice?.metadata?.baselineAgrees).toBe(false);
+  });
+
+  it("writes no shadow keys and no shadow state when baselineMode is off", async () => {
+    const card = issue("i1", { title: "Review PR #1234 against the written criteria" });
+    const harness = await boot(shadowConfig({ baselineMode: "off" }), [card]);
+    stubClassifier(harness, "T2");
+
+    await harness.emit("issue.created", { title: card.title }, { entityId: "i1", companyId: COMPANY, entityType: "issue" });
+
+    expect((await harness.ctx.issues.get("i1", COMPANY))?.labelIds).toContain("lbl-T2");
+    const notice = harness.activity.find((entry) => entry.message.includes("at card creation"));
+    expect(notice?.metadata).not.toHaveProperty("baseline");
+    expect(await shadowState(harness)).toBeNull();
+  });
+
+  it("computes nothing when classification is disabled", async () => {
+    const card = issue("i1", { title: "Review PR #1234 against the written criteria" });
+    const harness = await boot(shadowConfig({ enabled: false }), [card]);
+    const calls = stubClassifier(harness, "T2");
+
+    await harness.emit("issue.created", { title: card.title }, { entityId: "i1", companyId: COMPANY, entityType: "issue" });
+
+    expect(calls).toHaveLength(0);
+    expect((await harness.ctx.issues.get("i1", COMPANY))?.labelIds).toEqual([]);
+    expect(await shadowState(harness)).toBeNull();
+  });
+});

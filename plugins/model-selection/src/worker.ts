@@ -2763,6 +2763,14 @@ export function createPlugin() {
           const exclusions = await readClassificationExclusions(companyId);
           await ctx.state.set(classificationExclusionsKey(companyId), { ...exclusions, [issueId]: true });
         }
+        // Baseline shadow (report-only): evidence only, never a decision.
+        const shadow = await recordClassifierShadow(
+          companyId,
+          config.classification,
+          described.title,
+          described.description,
+          labelTier,
+        );
         await ctx.activity.log({
           companyId,
           message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${
@@ -2775,6 +2783,14 @@ export function createPlugin() {
             confidence: judgement.confidence,
             reason: judgement.reason,
             source,
+            ...(shadow === null
+              ? {}
+              : {
+                  baseline: shadow.baseline,
+                  baselineRule: shadow.baselineRule,
+                  baselineAgrees: shadow.baselineAgrees,
+                  classifierDrift: shadow.classifierDrift,
+                }),
           },
         });
         return labelTier;
