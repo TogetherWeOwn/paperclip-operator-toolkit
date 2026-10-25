@@ -37,7 +37,10 @@ checklist (like risky/release-please); every skip exits 0 with a
 notice; anything that prevents reaching a decision exits 1 (fail closed).
 Check-run and comment reads follow `page=N` to the last page, and exit 1 past
 3000 items rather than decide on a partial view. The file list is capped at
-one page; a full page routes the PR to review.
+one page; a full page routes the PR to review. Read the file list again for
+final readiness, applying the same full-page rule: a base retarget can change
+paths without changing the head SHA. Final PR labels also come from the current
+PR read, not the initial risk-routing snapshot.
 
 Trigger record per head: one `@togetherweown-reviewer review <sha>` comment
 (audit trail: only comments authored by github-actions[bot] count, so a

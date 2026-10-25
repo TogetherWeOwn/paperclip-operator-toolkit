@@ -143,6 +143,16 @@ def ci_ok_green(runs, head_sha):
         for r in latest.values())
 
 
+def changed_paths(number):
+    """Read current paths, conservatively routing truncated lists to review."""
+    files = api("/pulls/%d/files?per_page=100" % number) or []
+    changed = [f.get("filename", "") for f in files]
+    if len(files) >= 100:
+        # A risky path may be past page 1; preserve conservative routing.
+        changed.append(".github/workflows/TRUNCATED-FILE-LIST-unknown")
+    return changed
+
+
 def head_decision(full, head_sha, check_runs, changed):
     """Re-evaluate readiness from the supplied PR and check snapshots."""
     if not ready_pr(full, head_sha):
@@ -187,14 +197,7 @@ def main():
         notice("ci-ok is not green on head %s; waiting for CI" % head_sha[:12])
         return 0
 
-    files = api("/pulls/%d/files?per_page=100" % number) or []
-    changed = [f.get("filename", "") for f in files]
-    truncated = len(files) >= 100
-    if truncated:
-        # Fail toward one extra review, not toward skipping a risky path we
-        # could not see: append a path that matches RISKY_PATH_PATTERNS so
-        # is_risky() routes to review even when the risky file is past page 1.
-        changed.append(".github/workflows/TRUNCATED-FILE-LIST-unknown")
+    changed = changed_paths(number)
 
     action, reason = head_decision(full, head_sha, check_runs, changed)
     if action != "request":
@@ -258,6 +261,8 @@ def main():
 
     # Use the same final check snapshot for CI readiness and retry history.
     # ci_ok_green selects the newest CI attempts without discarding reviews.
+    # Retargeting can change paths without changing the head SHA.
+    changed = changed_paths(number)
     current = api("/pulls/%d" % number)
     action, reason = head_decision(current, head_sha, fresh_runs, changed)
     if action != "request":
