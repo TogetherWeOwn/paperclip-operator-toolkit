@@ -401,6 +401,14 @@ write. Roll back by changing only `shadowEmit.enabled` to `false`; leave the
 shard files as historical evidence. No host service or timer is started or
 stopped by this feature.
 
+### Classifier baseline shadow
+
+Every live classification also records a deterministic second opinion —
+anchor-compiled rules that emit T2/T3 or abstain, never T1 — plus a rolling
+T1-share drift signal. Report-only: labels, pins and calls are unchanged.
+Contract and enforcement bar: [docs/classifier-baseline-shadow.md](docs/classifier-baseline-shadow.md).
+Roll back with `classification.baselineMode: "off"`.
+
 ### Config
 
 See `src/config/schema.ts`. Every number that decides anything lives in config,
