@@ -113,6 +113,39 @@ def has_error_outcome(runs):
     return False
 
 
+def ready_pr(pr, head_sha):
+    """Require affirmative current PR facts, not merely an earlier association."""
+    return (pr.get("state") == "open" and pr.get("draft") is False
+            and (pr.get("head") or {}).get("sha") == head_sha)
+
+
+def ci_ok_green(runs, head_sha):
+    """Use latest runs only; missing or conflicting SHA-bound evidence is not green."""
+    ci = [r for r in runs if r.get("name") == CI_OK_CHECK]
+    return bool(ci) and all(
+        r.get("head_sha") == head_sha and r.get("status") == "completed"
+        and r.get("conclusion") == "success" for r in ci)
+
+
+def head_decision(full, head_sha, check_runs, changed):
+    """Re-evaluate readiness from the supplied PR and check snapshots."""
+    if not ready_pr(full, head_sha):
+        return "skip", "PR is no longer open, non-draft and on the requested head"
+    return review_trigger.decide({
+        "is_draft": full["draft"],
+        "ci_ok_green": ci_ok_green(check_runs, head_sha),
+        "head_sha": head_sha,
+        "head_ref": (full.get("head") or {}).get("ref", ""),
+        "author": ((full.get("user") or {}).get("login") or ""),
+        "body": full.get("body") or "",
+        "changed_files": changed,
+        "labels": [l.get("name", "") for l in (full.get("labels") or [])],
+        "additions": full.get("additions", 0),
+        "deletions": full.get("deletions", 0),
+        "check_runs": check_runs,
+    })
+
+
 def main():
     head_sha = os.environ.get("HEAD_SHA", "")
     if not head_sha or not os.environ.get("REPO") or not os.environ.get("GH_TOKEN"):
@@ -128,22 +161,13 @@ def main():
     number = pr["number"]
 
     full = api("/pulls/%d" % number)
-    if full.get("draft"):
-        notice("PR #%d is a draft; drafts are never reviewed" % number)
+    if not ready_pr(full, head_sha):
+        notice("PR #%d is not open and non-draft on the requested head" % number)
         return 0
 
-    check_runs = [
-        {
-            "name": r.get("name"),
-            "status": r.get("status"),
-            "conclusion": r.get("conclusion"),
-            "head_sha": head_sha,
-        }
-        for r in paginate("/commits/%s/check-runs" % head_sha, key="check_runs")
-    ]
-    ci_ok = [r for r in check_runs
-             if r["name"] == CI_OK_CHECK and r["status"] == "completed"]
-    if not any(r["conclusion"] == "success" for r in ci_ok):
+    check_runs = paginate("/commits/%s/check-runs?filter=latest" % head_sha,
+                          key="check_runs")
+    if not ci_ok_green(check_runs, head_sha):
         notice("ci-ok is not green on head %s; waiting for CI" % head_sha[:12])
         return 0
 
@@ -156,20 +180,7 @@ def main():
         # is_risky() routes to review even when the risky file is past page 1.
         changed.append(".github/workflows/TRUNCATED-FILE-LIST-unknown")
 
-    payload = {
-        "is_draft": bool(full.get("draft")),
-        "ci_ok_green": True,
-        "head_sha": head_sha,
-        "head_ref": (full.get("head") or {}).get("ref", ""),
-        "author": ((full.get("user") or {}).get("login") or ""),
-        "body": full.get("body") or "",
-        "changed_files": changed,
-        "labels": [l.get("name", "") for l in (full.get("labels") or [])],
-        "additions": full.get("additions", 0),
-        "deletions": full.get("deletions", 0),
-        "check_runs": check_runs,
-    }
-    action, reason = review_trigger.decide(payload)
+    action, reason = head_decision(full, head_sha, check_runs, changed)
     if action != "request":
         notice("decision=skip (%s)" % reason)
         return 0
@@ -228,6 +239,20 @@ def main():
             return 0
         notice("retrying errored head %s after one errored review (one retry max)"
                % head_sha[:12])
+
+    # Retry history needs filter=all, but CI readiness needs the latest run:
+    # an older success must not mask a failed or pending rerun on this SHA.
+    latest_runs = paginate("/commits/%s/check-runs?filter=latest" % head_sha,
+                           key="check_runs")
+    current = api("/pulls/%d" % number)
+    if any(review_dedup.check_run_suppresses(r.get("name"), r.get("status"), r.get("conclusion"))
+           for r in latest_runs):
+        notice("a Paperclip Review run now covers head %s" % head_sha[:12])
+        return 0
+    action, reason = head_decision(current, head_sha, latest_runs, changed)
+    if action != "request":
+        notice("readiness changed before publication (%s)" % reason)
+        return 0
 
     api("/issues/%d/comments" % number, method="POST",
         body={"body": "%s\n\n%s" % (marker, reason)})

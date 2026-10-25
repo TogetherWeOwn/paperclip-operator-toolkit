@@ -94,7 +94,8 @@ def run_with(stub):
 
 
 def green_runs():
-    return [{"name": "ci-ok", "status": "completed", "conclusion": "success"}]
+    return [{"name": "ci-ok", "status": "completed", "conclusion": "success",
+             "head_sha": OUT_OF_SAMPLE_SHA}]
 
 
 class StepTest(unittest.TestCase):
@@ -136,7 +137,7 @@ class StepTest(unittest.TestCase):
 
     def test_ci_red_exits_zero_without_posting(self):
         stub = Stub(runs=[{"name": "ci-ok", "status": "completed",
-                           "conclusion": "failure"}])
+                           "conclusion": "failure", "head_sha": OUT_OF_SAMPLE_SHA}])
         self.assertEqual(run_with(stub), 0)
         self.assertEqual(stub.posts, [])
 

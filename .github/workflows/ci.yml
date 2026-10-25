@@ -1163,11 +1163,8 @@ jobs:
       # faked GitHub API; the dedup guard, the one-retry reconciler and the
       # orphan sweeper are offline with stubbed subprocesses. No API,
       # database, credential or timer.
-      - name: review trigger decision suite
-        run: python3 -m unittest discover -s .github/scripts -p 'test_review_trigger.py'
-
-      - name: review trigger step suite
-        run: python3 -m unittest discover -s .github/scripts -p 'test_review_trigger_step.py'
+      - name: review trigger and readiness suites
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_review*.py'
 
       - name: same-head review idempotency suites
         run: (cd ops/productivity && python3 -B -m unittest -v test_review_error_rerequest test_orphan_prs)
