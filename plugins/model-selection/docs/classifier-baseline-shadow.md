@@ -19,6 +19,8 @@ the entry gate could have avoided.
 - *Drift exit.* `classifierDrift` is true once the rolling window holds at
   least `driftMinN` outcomes and the classifier's T1 share reaches
   `driftT1Share` (defaults 50 / 0.85, above the measured 0.77 skew).
+  `driftMinN` must be an integer from 1 to 50 (the window cap); invalid
+  values resolve to 50 so the drift signal remains reachable.
 
 ## Rules
 

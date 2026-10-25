@@ -26,6 +26,7 @@ import {
 import { validateSecretRefShape } from "./secret-ref.js";
 import { resolveFormatCompatibility, type FormatCompatibility } from "../format-compatibility.js";
 import type { ModelEntry } from "../engine/types.js";
+import { SHADOW_WINDOW_MAX } from "../engine/classifier-shadow.js";
 import type { LanePaceDefinition, PaceWindowDefinition, PacePolicy } from "../lane-capacity/pace.js";
 
 /** Mirrors paperclip-model-router's `SecretRef`. */
@@ -555,9 +556,10 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       driftMinN:
         typeof classification.driftMinN === "number" &&
         Number.isInteger(classification.driftMinN) &&
-        classification.driftMinN >= 1
+        classification.driftMinN >= 1 &&
+        classification.driftMinN <= SHADOW_WINDOW_MAX
           ? classification.driftMinN
-          : 50,
+          : SHADOW_WINDOW_MAX,
       driftT1Share:
         typeof classification.driftT1Share === "number" &&
         Number.isFinite(classification.driftT1Share) &&
