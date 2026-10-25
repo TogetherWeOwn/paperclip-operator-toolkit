@@ -44,7 +44,8 @@ class HeadEvidenceTest(unittest.TestCase):
         for status, conclusion in (("completed", "failure"), ("queued", None)):
             with self.subTest(status=status):
                 stub = MovingEvidence(runs=[ci_run()], later_runs=[
-                    ci_run(), dict(ci_run(), status=status, conclusion=conclusion)])
+                    dict(ci_run(), id=10),
+                    dict(ci_run(), id=11, status=status, conclusion=conclusion)])
                 self.assertEqual(run_with(stub), 0)
                 self.assertEqual(stub.posts, [])
 
@@ -63,9 +64,29 @@ class HeadEvidenceTest(unittest.TestCase):
                 self.assertEqual("label:review-ready" in stub.posts, publish)
 
     def test_latest_green_rerun_can_replace_an_old_failure(self):
-        stub = MovingEvidence(runs=[ci_run(conclusion="failure"), ci_run()])
+        for runs in ([dict(ci_run(conclusion="failure"), id=10),
+                      dict(ci_run(), id=11)],
+                     [dict(ci_run(), id=11),
+                      dict(ci_run(conclusion="failure"), id=10)]):
+            with self.subTest(runs=runs):
+                stub = MovingEvidence(runs=[ci_run()], later_runs=runs)
+                self.assertEqual(run_with(stub), 0)
+                self.assertIn("label:review-ready", stub.posts)
+
+    def test_ambiguous_ci_history_withholds_publication(self):
+        for runs in ([ci_run(), ci_run()],
+                     [dict(ci_run(), id=10), dict(ci_run(), id=10)]):
+            with self.subTest(runs=runs):
+                stub = MovingEvidence(runs=[ci_run()], later_runs=runs)
+                self.assertEqual(run_with(stub), 0)
+                self.assertEqual(stub.posts, [])
+
+    def test_success_from_another_app_does_not_hide_red_ci(self):
+        stub = MovingEvidence(runs=[ci_run()], later_runs=[
+            dict(ci_run(conclusion="failure"), id=10, app={"id": 1}),
+            dict(ci_run(), id=11, app={"id": 2})])
         self.assertEqual(run_with(stub), 0)
-        self.assertIn("label:review-ready", stub.posts)
+        self.assertEqual(stub.posts, [])
 
 
 if __name__ == "__main__":

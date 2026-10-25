@@ -120,11 +120,27 @@ def ready_pr(pr, head_sha):
 
 
 def ci_ok_green(runs, head_sha):
-    """Use latest runs only; missing or conflicting SHA-bound evidence is not green."""
-    ci = [r for r in runs if r.get("name") == CI_OK_CHECK]
-    return bool(ci) and all(
-        r.get("head_sha") == head_sha and r.get("status") == "completed"
-        and r.get("conclusion") == "success" for r in ci)
+    """Require the newest ci-ok attempt per app; ambiguous history fails closed."""
+    latest = {}
+    for run in runs:
+        if run.get("name") != CI_OK_CHECK:
+            continue
+        if run.get("head_sha") != head_sha:
+            return False
+        app_id = (run.get("app") or {}).get("id")
+        previous = latest.get(app_id)
+        if previous is not None:
+            # GitHub check-run IDs increase across reruns. Do not guess from
+            # response order or timestamps when multiple attempts lack IDs.
+            ids = (previous.get("id"), run.get("id"))
+            if any(type(i) is not int for i in ids) or ids[0] == ids[1]:
+                return False
+            if ids[0] > ids[1]:
+                continue
+        latest[app_id] = run
+    return bool(latest) and all(
+        r.get("status") == "completed" and r.get("conclusion") == "success"
+        for r in latest.values())
 
 
 def head_decision(full, head_sha, check_runs, changed):
@@ -240,16 +256,10 @@ def main():
         notice("retrying errored head %s after one errored review (one retry max)"
                % head_sha[:12])
 
-    # Retry history needs filter=all, but CI readiness needs the latest run:
-    # an older success must not mask a failed or pending rerun on this SHA.
-    latest_runs = paginate("/commits/%s/check-runs?filter=latest" % head_sha,
-                           key="check_runs")
+    # Use the same final check snapshot for CI readiness and retry history.
+    # ci_ok_green selects the newest CI attempts without discarding reviews.
     current = api("/pulls/%d" % number)
-    if any(review_dedup.check_run_suppresses(r.get("name"), r.get("status"), r.get("conclusion"))
-           for r in latest_runs):
-        notice("a Paperclip Review run now covers head %s" % head_sha[:12])
-        return 0
-    action, reason = head_decision(current, head_sha, latest_runs, changed)
+    action, reason = head_decision(current, head_sha, fresh_runs, changed)
     if action != "request":
         notice("readiness changed before publication (%s)" % reason)
         return 0
