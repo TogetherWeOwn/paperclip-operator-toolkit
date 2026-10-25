@@ -330,6 +330,13 @@ export const PLUGIN_STATE_KEYS = {
    */
   classifierLabeledIssues: "classifierLabeledIssues",
   /**
+   * Bounded rolling window (`ShadowWindow`, newest 50) of classifier/baseline
+   * shadow pairs, written by both classify paths whenever a live
+   * classification lands. The entry-gate enforcement bar and the drift exit
+   * both read this; it is evidence only and never changes a decision.
+   */
+  classifierShadow: "classifierShadow",
+  /**
    *  port of `lane_outage.json` — an operator-declared outage the
    * telemetry cannot see. Runtime-settable (mirroring `operatorOverrides`),
    * not deploy-time config: the Python source is a hand-edited file read
