@@ -732,6 +732,8 @@ jobs:
       # always-run scans, the full-run triggers, and the absence of
       # workflow-level path filters -- with a positive control for each.
       - name: change-gating contract holds
+        env:
+          PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
         run: ./test_ci_gating.sh
 
       # TOG-3884's dedicated-UID offline fixtures (`github-runner/`) stay in

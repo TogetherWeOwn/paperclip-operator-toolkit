@@ -180,5 +180,42 @@ for title in 'Immutable Action references and red/green controls' 'Workflow hard
   done
 done
 
+# Parsed YAML controls: quoting keys, folding the command, and inherited or
+# step-level shells must not let the contract be skipped or neutralized.
+for title in 'Immutable Action references and red/green controls' 'Workflow hardening regression controls'; do
+  for bypass in "'if': github.event_name == 'never'" '"continue-on-error": true' 'shell: echo {0}'; do
+    mutate parsed-bypass "      - name: $title" "      - name: $title
+        $bypass"
+    expect_fail "$title parsed $bypass" "$MUTANT_FILE"
+  done
+done
+for command in 'python3 scripts/test_action_pins.py' 'python3 scripts/test_workflow_hardening.py'; do
+  mutate folded-run "        run: $command" "        run: $command
+          || true"
+  expect_fail "$command folded failure swallowing" "$MUTANT_FILE"
+done
+mutate job-continue-on-error '  offline-suites:
+' '  offline-suites:
+    "continue-on-error": true
+'
+expect_fail job-continue-on-error "$MUTANT_FILE"
+mutate job-shell '  offline-suites:
+' '  offline-suites:
+    defaults:
+      run:
+        shell: echo {0}
+'
+expect_fail job-shell "$MUTANT_FILE"
+mutate workflow-shell 'jobs:
+' 'defaults:
+  run:
+    shell: echo {0}
+jobs:
+'
+expect_fail workflow-shell "$MUTANT_FILE"
+mutate duplicate-key '        run: python3 scripts/test_action_pins.py' '        run: python3 scripts/test_action_pins.py
+        run: echo bypass'
+expect_fail duplicate-key "$MUTANT_FILE"
+
 printf '%s passed, %s failed\n' "$pass" "$fail"
 (( fail == 0 ))
