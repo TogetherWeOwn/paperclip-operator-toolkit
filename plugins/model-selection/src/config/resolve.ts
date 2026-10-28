@@ -26,6 +26,7 @@ import {
 import { validateSecretRefShape } from "./secret-ref.js";
 import { resolveFormatCompatibility, type FormatCompatibility } from "../format-compatibility.js";
 import type { ModelEntry } from "../engine/types.js";
+import { SHADOW_WINDOW_MAX } from "../engine/classifier-shadow.js";
 import type { LanePaceDefinition, PaceWindowDefinition, PacePolicy } from "../lane-capacity/pace.js";
 
 /** Mirrors paperclip-model-router's `SecretRef`. */
@@ -81,6 +82,12 @@ export interface ClassificationConfig {
   batchSize: number;
   /** : re-examine a `tier:*` label this plugin did not write. Defaults on. */
   reclassifyForeignLabels: boolean;
+  /** Baseline shadow mode. `shadow` measures; `off` skips. No enforce value exists yet. */
+  baselineMode: "shadow" | "off";
+  /** Shadow outcomes required before the drift exit can fire. */
+  driftMinN: number;
+  /** Classifier T1 share at/above which the drift exit reports drift. */
+  driftT1Share: number;
 }
 
 export interface ResolvedConfig {
@@ -545,6 +552,21 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       t2ConfidenceFloor: num(classification.t2ConfidenceFloor, 0.6),
       batchSize: num(classification.batchSize, 20),
       reclassifyForeignLabels: bool(classification.reclassifyForeignLabels, true),
+      baselineMode: classification.baselineMode === "off" ? "off" : "shadow",
+      driftMinN:
+        typeof classification.driftMinN === "number" &&
+        Number.isInteger(classification.driftMinN) &&
+        classification.driftMinN >= 1 &&
+        classification.driftMinN <= SHADOW_WINDOW_MAX
+          ? classification.driftMinN
+          : SHADOW_WINDOW_MAX,
+      driftT1Share:
+        typeof classification.driftT1Share === "number" &&
+        Number.isFinite(classification.driftT1Share) &&
+        classification.driftT1Share >= 0 &&
+        classification.driftT1Share <= 1
+          ? classification.driftT1Share
+          : 0.85,
     },
     earnIn: {
       enabled: bool(earnIn.enabled, false),

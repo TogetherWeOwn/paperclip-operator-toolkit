@@ -1154,7 +1154,7 @@ jobs:
 
       # Offline-only shadow metric tests; no GitHub or production collection in CI.
       - name: escape ledger linkage suite
-        run: python3 -I -m unittest discover -s ops/kpi -p 'test_escape_ledger.py' -v
+        run: python3 -I -m unittest discover -s ops/kpi -p 'test_*.py' -v
 
       # Blocker-ledger classes 4-7: deterministic pre-review gates
       # (migration, API contract, concurrency, lockfile). Logic is stdlib;

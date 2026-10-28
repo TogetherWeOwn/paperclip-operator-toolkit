@@ -544,4 +544,33 @@ describe("config resolution", () => {
       expect(errors).toEqual([]);
     });
   });
+
+  describe("classifier baseline shadow (report-only)", () => {
+    it("defaults to shadow with a 50-wide window and a 0.85 T1 drift bar", () => {
+      const classification = resolveConfig({}).classification;
+      expect(classification.baselineMode).toBe("shadow");
+      expect(classification.driftMinN).toBe(50);
+      expect(classification.driftT1Share).toBe(0.85);
+    });
+
+    it("honours an explicit off and explicit drift bounds", () => {
+      const classification = resolveConfig({
+        classification: { baselineMode: "off", driftMinN: 20, driftT1Share: 0.9 },
+      }).classification;
+      expect(classification.baselineMode).toBe("off");
+      expect(classification.driftMinN).toBe(20);
+      expect(classification.driftT1Share).toBe(0.9);
+    });
+
+    it("falls back to defaults on unknown or out-of-range shadow values", () => {
+      // Same silent-fallback style as the confidence floors: a shadow-only
+      // signal never fails config over a typo, it just measures with defaults.
+      const classification = resolveConfig({
+        classification: { baselineMode: "enforce", driftMinN: 0, driftT1Share: 85 },
+      }).classification;
+      expect(classification.baselineMode).toBe("shadow");
+      expect(classification.driftMinN).toBe(50);
+      expect(classification.driftT1Share).toBe(0.85);
+    });
+  });
 });

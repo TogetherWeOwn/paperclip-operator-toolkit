@@ -653,6 +653,68 @@ class EndToEnd(unittest.TestCase):
             self.assertTrue(row.endswith("| N/A |"), row)
         self.assertFalse((self.root / "ops/kpi/escape-history/2026-10-17.jsonl").exists())
 
+    def test_degraded_merge_keeps_multi_repo_observations_and_history(self):
+        """Summary validation cannot discard otherwise usable legacy observations."""
+        cases = {"null_commit": {"mergeCommit": None},
+                 "null_head": {"headRefOid": None},
+                 "bad_commit": {"mergeCommit": {"oid": "sensitive-value"}},
+                 "bad_head": {"headRefOid": "sensitive-value"},
+                 "bad_opened_at": {"createdAt": "sensitive-value"}}
+        for name, changes in cases.items():
+            with self.subTest(case=name):
+                self.args.output_dir = self.root / name
+                history = self.args.output_dir / "escape-history/2026-10-17.jsonl"
+                history.parent.mkdir(parents=True)
+                history.write_text("completed-baseline\n")
+                good, degraded = pr(), dict(pr(), **changes)
+
+                def ensure_commit(mirror, repo, sha, github):
+                    if not sha or not ledger.SHA.fullmatch(sha):
+                        raise ledger.CollectionError("missing merge commit identity")
+
+                def linker_for(repo, mirror, prs, **kwargs):
+                    instance = unittest.mock.Mock(prs={p["number"]: p for p in prs},
+                                                  unresolved_revert_commits=0)
+                    instance.analyze.return_value = None
+                    instance.direct_reverts.return_value = []
+                    return instance
+
+                with patch.object(ledger, "GitHub") as gh, \
+                        patch.object(ledger, "Linker", side_effect=linker_for), \
+                        patch.object(ledger, "ensure_mirror"), \
+                        patch.object(ledger, "ensure_commit", side_effect=ensure_commit), \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    gh.return_value.repos.return_value = ["Org/good", "Org/degraded"]
+                    gh.return_value.merged.side_effect = lambda repo, start: [
+                        good if repo == "Org/good" else degraded]
+                    gh.return_value.default_branches = dict.fromkeys(["Org/good", "Org/degraded"], "main")
+                    self.assertEqual(ledger.run(self.args), 2)
+                records = [json.loads(line) for line in
+                           (self.args.output_dir / "escapes.jsonl").read_text().splitlines()]
+                meta = records[0]
+                self.assertEqual(meta["status"], "partial")
+                self.assertIsNone(meta["quality"])
+                self.assertIsNone(meta["escapes_per_100_merges"])
+                self.assertIn("quality summary unavailable: invalid merge or event data", meta["errors"])
+                self.assertNotIn("sensitive-value", json.dumps(meta["errors"]) + output.getvalue())
+                self.assertEqual(meta["merges"], 2)
+                self.assertEqual({r["repo"] for r in records if r["type"] == "merge"},
+                                 {"Org/good", "Org/degraded"})
+                rows = [r for r in records if r["type"] == "aggregate"]
+                self.assertEqual(sum(r["merges"] for r in rows
+                                     if r["repo"] == "ALL" and r["period"] == "day"), 2)
+                self.assertTrue(all(r["coverage_status"] == "partial" and
+                                    r["escapes_per_100_merges"] is None for r in rows))
+                markdown = (self.args.output_dir / "ESCAPES.md").read_text()
+                self.assertIn("Collection: **partial**", markdown)
+                self.assertIn("Org/good (PARTIAL; observed counts only)", markdown)
+                self.assertNotIn("## Single quality guardrail", markdown)
+                self.assertEqual(history.read_text(), "completed-baseline\n")
+                completed = json.loads(output.getvalue().splitlines()[-1])
+                self.assertEqual(completed["event"], "ledger_completed")
+                self.assertEqual(completed["status"], "partial")
+                self.assertIsNone(completed["rate"])
+
     def test_collection_failure_emits_partial_not_zero_percent(self):
         with patch.object(ledger, "GitHub") as gh, contextlib.redirect_stdout(io.StringIO()):
             gh.return_value.repos.return_value = ["Org/repo"]

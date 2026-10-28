@@ -302,10 +302,13 @@ hdr "11. The converted tools reach the backend the caller SELECTED"
 drives_selected_backend() {
   local desc="$1" tool="$2"; shift 2
   run_case
-  ( export PAPERCLIP_SQL_BACKEND=psql DATABASE_URL='postgres://u:p@h/d'
-    export COMPANY_ID=00000000-0000-0000-0000-000000000000
-    export PAPERCLIP_CLI="$WORK/bin/paperclipai"
-    "$HERE/$tool" "$@" ) >/dev/null 2>&1
+  # Preserve the recording PATH, not the caller's credentials, libpq overrides
+  # or BASH_ENV (which can replace PATH before the tool reaches our fakes).
+  env -i PATH="$PATH" HOME="$WORK" REC="$REC" \
+    PAPERCLIP_SQL_BACKEND=psql DATABASE_URL='postgres://u:p@h/d' \
+    COMPANY_ID=00000000-0000-0000-0000-000000000000 \
+    PAPERCLIP_CLI="$WORK/bin/paperclipai" \
+    "$HERE/$tool" "$@" >/dev/null 2>&1
   if called podman; then
     bad "$desc — went to podman despite PAPERCLIP_SQL_BACKEND=psql"
   elif called psql; then
@@ -315,6 +318,20 @@ drives_selected_backend() {
   fi
 }
 drives_selected_backend "skills.sh show queries through lib/pcsql.sh"    skills.sh    show T0
+
+# A caller's shell startup hook can replace PATH before skills.sh reaches the
+# recording fakes. Use a hook that exits instead: a broken fixture then fails
+# without ever falling through to a real backend. Ambient libpq settings must
+# not override the fixture URL either.
+printf 'exit 23\n' > "$WORK/refuse-startup.sh"
+BASH_ENV="$WORK/refuse-startup.sh" PGHOST=ambient-host PGPASSWORD=ambient-password \
+  drives_selected_backend "skills.sh backend probe ignores ambient startup and libpq settings" skills.sh show T0
+if called psql && grep -qx 'PGHOST=h' "$REC/psql.env" \
+               && grep -qx 'PGPASSWORD=p' "$REC/psql.env"; then
+  ok "the tool's backend receives only the fixture connection settings"
+else
+  bad "ambient configuration displaced the fixture connection settings"
+fi
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

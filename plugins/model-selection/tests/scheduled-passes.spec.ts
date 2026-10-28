@@ -3320,6 +3320,96 @@ describe("scheduled passes ( tier_dispatcher.py port)", () => {
       expect(calls).toHaveLength(2);
     });
 
+    describe("classifyIssues baseline shadow (report-only)", () => {
+      function shadowRow(id: string, title: string, description: string) {
+        return { ...classifyRow(id), title, description };
+      }
+
+      async function shadowState(harness: Awaited<ReturnType<typeof boot>>) {
+        return harness.ctx.state.get({
+          scopeKind: "company",
+          scopeId: COMPANY,
+          stateKey: PLUGIN_STATE_KEYS.classifierShadow,
+        } as never);
+      }
+
+      it("records agreement when the baseline and the classifier concur, changing nothing", async () => {
+        const card = issue("i1", { labels: [], labelIds: [] });
+        const harness = await boot(classifyConfig(), [card]);
+        harness.ctx.db.query = async () =>
+          [shadowRow("i1", "Review PR #1234 against the written criteria", "d")] as never;
+        stubClassifier(harness, { tier: "T2", confidence: 0.9 });
+
+        await harness.runJob("classifyIssues");
+
+        // Shadow changes nothing: the classifier's label still lands.
+        expect((await harness.ctx.issues.get("i1", COMPANY))?.labelIds).toEqual(["lbl-T2"]);
+        const notice = harness.activity.find((entry) => entry.entityId === "i1");
+        expect(notice?.metadata?.tier).toBe("T2");
+        expect(notice?.metadata?.confidence).toBe(0.9);
+        expect(notice?.metadata?.baseline).toBe("T2");
+        expect(notice?.metadata?.baselineRule).toBe("named-review");
+        expect(notice?.metadata?.baselineAgrees).toBe(true);
+        expect(notice?.metadata?.classifierDrift).toBe(false);
+        expect(await shadowState(harness)).toEqual({
+          outcomes: [{ t: "T2", b: "T2", a: true }],
+        });
+      });
+
+      it("records disagreement without overriding the classifier", async () => {
+        const card = issue("i1", { labels: [], labelIds: [] });
+        const harness = await boot(classifyConfig(), [card]);
+        harness.ctx.db.query = async () =>
+          [shadowRow("i1", "Review PR #1234 against the written criteria", "d")] as never;
+        stubClassifier(harness, { tier: "T1", confidence: 0.9 });
+
+        await harness.runJob("classifyIssues");
+
+        expect((await harness.ctx.issues.get("i1", COMPANY))?.labelIds).toEqual(["lbl-T1"]);
+        const notice = harness.activity.find((entry) => entry.entityId === "i1");
+        expect(notice?.metadata?.baseline).toBe("T2");
+        expect(notice?.metadata?.baselineAgrees).toBe(false);
+        expect(await shadowState(harness)).toEqual({
+          outcomes: [{ t: "T1", b: "T2", a: false }],
+        });
+      });
+
+      it("records a null baseline when the rules abstain", async () => {
+        const card = issue("i1", { labels: [], labelIds: [] });
+        const harness = await boot(classifyConfig(), [card]);
+        harness.ctx.db.query = async () => [shadowRow("i1", "A card", "d")] as never;
+        stubClassifier(harness, { tier: "T1", confidence: 0.9 });
+
+        await harness.runJob("classifyIssues");
+
+        const notice = harness.activity.find((entry) => entry.entityId === "i1");
+        expect(notice?.metadata?.baseline ?? null).toBeNull();
+        expect(notice?.metadata?.baselineRule ?? null).toBeNull();
+        expect(notice?.metadata?.baselineAgrees ?? null).toBeNull();
+        expect(await shadowState(harness)).toEqual({
+          outcomes: [{ t: "T1", b: null, a: null }],
+        });
+      });
+
+      it("writes no shadow keys and no shadow state when baselineMode is off", async () => {
+        const card = issue("i1", { labels: [], labelIds: [] });
+        const harness = await boot(classifyConfig({ baselineMode: "off" }), [card]);
+        harness.ctx.db.query = async () =>
+          [shadowRow("i1", "Review PR #1234 against the written criteria", "d")] as never;
+        stubClassifier(harness, { tier: "T2", confidence: 0.9 });
+
+        await harness.runJob("classifyIssues");
+
+        expect((await harness.ctx.issues.get("i1", COMPANY))?.labelIds).toEqual(["lbl-T2"]);
+        const notice = harness.activity.find((entry) => entry.entityId === "i1");
+        expect(notice?.metadata).not.toHaveProperty("baseline");
+        expect(notice?.metadata).not.toHaveProperty("baselineRule");
+        expect(notice?.metadata).not.toHaveProperty("baselineAgrees");
+        expect(notice?.metadata).not.toHaveProperty("classifierDrift");
+        expect(await shadowState(harness)).toBeNull();
+      });
+    });
+
     // this pass hit 288 s max over the last 4 h — its rows
     // (`ctx.issues.get` plus the classifier HTTP call) pay the same contended
     // host-RPC cost as every other row-walking pass. The cooperative budget

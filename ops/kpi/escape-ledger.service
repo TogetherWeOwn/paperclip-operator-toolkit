@@ -7,6 +7,9 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=%h/paperclip-enterprise-company
 ExecStart=/usr/bin/python3 -I %h/paperclip-enterprise-company/ops/kpi/escape_ledger.py --root %h/paperclip-enterprise-company --output-dir %h/.local/state/togetherweown/escape-ledger --mirror-root %h/build/review-rules-mirrors --review-db-container paperclip-db --container-runtime docker --memory-dir-from-root --entry-point systemd
+# Also invalidate the spool after a failed collector. Matching INVOCATION_ID
+# prevents a previous run's otherwise fresh snapshot from looking successful.
+ExecStopPost=/usr/bin/python3 -I %h/paperclip-enterprise-company/ops/kpi/dora_scoreboard.py --ledger %h/.local/state/togetherweown/escape-ledger/escapes.jsonl --output-dir %h/.local/state/togetherweown/escape-ledger --entry-point systemd
 TimeoutStartSec=2h
 Nice=10
 IOSchedulingClass=idle

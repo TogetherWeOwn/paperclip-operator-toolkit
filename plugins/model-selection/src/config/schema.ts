@@ -5,6 +5,7 @@ import {
   TIERS,
 } from "../constants.js";
 import { EFFORT_LADDER } from "../engine/effort.js";
+import { SHADOW_WINDOW_MAX } from "../engine/classifier-shadow.js";
 
 const MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
 
@@ -457,6 +458,20 @@ export const SELECTION_CONFIG_SCHEMA = {
          * card is still never touched either way.
          */
         reclassifyForeignLabels: { type: "boolean", default: true },
+        /**
+         * Classifier baseline shadow (report-only). `shadow` (default) runs
+         * the deterministic anchor baseline alongside every live
+         * classification and records the pair; it never changes a label, a
+         * pin, or a call. `off` skips the baseline entirely. There is
+         * deliberately no `enforce` value: skipping the classifier on a
+         * decisive baseline ships only after the shadow evidence clears its
+         * bar (see docs/classifier-baseline-shadow.md).
+         */
+        baselineMode: { type: "string", enum: ["shadow", "off"], default: "shadow" },
+        /** Outcomes the shadow window must hold before the drift exit can fire. */
+        driftMinN: { type: "integer", minimum: 1, maximum: SHADOW_WINDOW_MAX, default: SHADOW_WINDOW_MAX },
+        /** Classifier T1 share at/above which the drift exit reports drift. */
+        driftT1Share: { type: "number", minimum: 0, maximum: 1, default: 0.85 },
       },
       default: {},
     },
