@@ -36,8 +36,6 @@ on:
 
 permissions:
   contents: read
-  checks: read
-  pull-requests: write
 
 concurrency:
   group: review-trigger-${{ github.event.workflow_run.head_sha }}
@@ -46,6 +44,10 @@ concurrency:
 jobs:
   request-review:
     name: Request one review per ready head
+    permissions:
+      contents: read
+      checks: read # Verify the exact head's CI and existing review verdicts.
+      pull-requests: write # Post the deduplicated review request and readiness label.
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

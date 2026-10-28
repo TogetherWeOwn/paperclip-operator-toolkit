@@ -20,7 +20,7 @@
 # still lists the old path. Either half removed must turn this gate red.
 #
 # Usage: verification/ci-gating.sh [workflow-file]
-# Exit 0 gate holds, 1 gate broken. Offline, stdlib python3 only.
+# Exit 0 gate holds, 1 gate broken. Offline; requires PyYAML.
 # ===========================================================================
 set -Eeuo pipefail
 
@@ -31,6 +31,24 @@ python3 - "$WORKFLOW" <<'PY'
 from pathlib import Path
 import re
 import sys
+
+try:
+    import yaml
+except ImportError:
+    raise SystemExit("FAIL: PyYAML is required to validate workflow execution")
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    """Reject ambiguous mappings instead of accepting a shadowed execution key."""
+
+    def construct_mapping(self, node, deep=False):
+        self.flatten_mapping(node)
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise ValueError(f"duplicate YAML key: {key!r}")
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
 
 text = Path(sys.argv[1]).read_text()
 
@@ -197,6 +215,45 @@ for cmd in ("./test_sdlc_foundation_placement.sh",
             "python3 -m unittest test_sdlc_foundation_acceptance",
             "./templates/org-github/tests/test_sdlc_foundation.sh"):
     check(f"ci.yml executes {cmd}", cmd in noncomment)
+
+# Parse execution properties instead of matching YAML spelling: quoted keys,
+# folded scalars, inherited shells and duplicate keys affect what Actions runs.
+try:
+    workflow = yaml.load(text, Loader=UniqueKeyLoader)
+    if not isinstance(workflow, dict):
+        raise ValueError("workflow is not a mapping")
+    jobs = workflow.get("jobs")
+    if not isinstance(jobs, dict) or not isinstance(jobs.get("offline-suites"), dict):
+        raise ValueError("offline-suites job is missing or invalid")
+    offline = jobs["offline-suites"]
+    steps = offline.get("steps")
+    if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
+        raise ValueError("offline-suites steps are invalid")
+except (yaml.YAMLError, ValueError, TypeError) as exc:
+    raise SystemExit(f"FAIL: cannot parse workflow execution properties: {exc}")
+
+
+def default_shell(scope):
+    defaults = scope.get("defaults", {})
+    if not isinstance(defaults, dict):
+        return False
+    run = defaults.get("run", {})
+    return isinstance(run, dict) and ("shell" not in run or run["shell"] == "bash")
+
+
+check("offline-suites cannot swallow job failure", "continue-on-error" not in offline)
+check("workflow and offline-suites use a safe default shell",
+      default_shell(workflow) and default_shell(offline))
+for title, command in (
+        ("Immutable Action references and red/green controls", "python3 scripts/test_action_pins.py"),
+        ("Workflow hardening regression controls", "python3 scripts/test_workflow_hardening.py")):
+    matches = [step for step in steps if step.get("name") == title]
+    step = matches[0] if len(matches) == 1 else {}
+    check(f"offline-suites executes {command}",
+          len(matches) == 1 and step.get("run") == command)
+    check(f"{title} cannot skip or swallow failures",
+          len(matches) == 1 and "if" not in step and "continue-on-error" not in step
+          and ("shell" not in step or step["shell"] == "bash"))
 
 # The drain keeps describing red runs; it must not become a required gate.
 drain = bodies.get("failure-log-drain")

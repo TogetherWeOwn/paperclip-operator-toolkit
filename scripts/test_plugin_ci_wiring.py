@@ -56,13 +56,19 @@ class PluginWiring(unittest.TestCase):
         """Render the aggregator's expressions from fixture job results and run it."""
         block = job(self.text, "ci-ok")
         script = textwrap.dedent(block.split("        run: |\n", 1)[1])
-        script = re.sub(r"\$\{\{ needs\.([a-z-]+)\.result \}\}", lambda m: results[m.group(1)], script)
-        for state in ("failure", "cancelled"):
-            flag = "true" if state in results.values() else "false"
-            script = script.replace("${{ contains(needs.*.result, '%s') }}" % state, flag)
-        self.assertNotIn("${{", script)
-        return subprocess.run(["/bin/bash", "-c", script], env={"PATH": "/usr/bin:/bin"},
-                              capture_output=True, text=True)
+        def render(value):
+            value = re.sub(r"\$\{\{ needs\.([a-z-]+)\.result \}\}", lambda m: results[m.group(1)], value)
+            for state in ("failure", "cancelled"):
+                flag = "true" if state in results.values() else "false"
+                value = value.replace("${{ contains(needs.*.result, '%s') }}" % state, flag)
+            self.assertNotIn("${{", value)
+            return value
+
+        env = {key: render(value) for key, value in
+               re.findall(r"^          ([A-Z_]+): (.+)$", block.split("        run: |\n", 1)[0], re.M)}
+        return subprocess.run(["/bin/bash", "-c", render(script)],
+                              env={"PATH": "/usr/bin:/bin", **env},
+                              capture_output=True, text=True, timeout=10)
 
     def test_ci_ok_refuses_a_skipped_or_failed_scan(self):
         everything = ("changes", "privilege-suites", "offline-suites", "long-mutation-gates",
@@ -91,7 +97,9 @@ class PluginWiring(unittest.TestCase):
     def test_single_aggregator_covers_all_plugin_checks_and_scans(self):
         block = job(self.text, "ci-ok")
         self.assertIn("if: ${{ !cancelled() }}", block)
-        self.assertIn("needs.changes.result }}' != 'success'", block)
+        self.assertIn("CHANGES_RESULT: ${{ needs.changes.result }}", block)
+        self.assertIn('if [ "$CHANGES_RESULT" != \'success\' ]', block)
+        self.assertNotIn("${{", block.split("        run: |\n", 1)[1])
         self.assertIn("contains(needs.*.result, 'failure')", block)
         self.assertIn("contains(needs.*.result, 'cancelled')", block)
         for name in ("changes", "cliproxy-insight-suite", "disclosure-scan", "secret-scan",
