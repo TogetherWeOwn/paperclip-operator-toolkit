@@ -50,6 +50,19 @@ PY
 }
 
 expect_pass baseline "$WORKFLOW"
+# Both immutable pins and historical major tags preserve clean checkout.
+# Use a minimal copy so this stays independent of Dependabot's current SHA.
+python3 - "$WORKFLOW" "$TMP/checkout-tag.yml" <<'PY'
+from pathlib import Path
+import re
+import sys
+text = Path(sys.argv[1]).read_text()
+text, count = re.subn(r"actions/checkout@[0-9a-fA-F]{40}[^\n]*", "actions/checkout@v7", text)
+if not count:
+    raise SystemExit("immutable checkout pin absent")
+Path(sys.argv[2]).write_text(text)
+PY
+expect_pass checkout-major-tag "$TMP/checkout-tag.yml"
 mutate wrong-label 'runs-on: ubuntu-latest' 'runs-on: ubuntu-22.04'
 expect_fail wrong-label "$MUTANT_FILE"
 # A self-hosted label would hand the job whatever that host exposes (including

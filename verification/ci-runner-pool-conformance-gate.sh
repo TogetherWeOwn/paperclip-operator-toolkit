@@ -52,10 +52,10 @@ checks = {
     "runner platform is a positive control": all(
         value in body for value in (
             '[[ "${RUNNER_OS:-}" == Linux ]]', '[[ "${RUNNER_ARCH:-}" == X64 ]]')),
-    # The checkout major version floats with Dependabot; the load-bearing assertion
-    # is `clean: true`, not the pin, so match any major.
+    # Dependabot updates immutable checkout pins. The clean-workspace contract
+    # accepts a full commit SHA (and legacy major tags); pinning has its own gate.
     "checkout cleans the workspace": re.search(
-        r"(?ms)- uses: actions/checkout@v[0-9]+\n\s+with:\n\s+clean: true", body) is not None,
+        r"(?ms)- uses: actions/checkout@(?:[0-9a-fA-F]{40}|v[0-9]+)(?:[ \t]+#[^\n]*)?\n\s+with:\n\s+clean: true", body) is not None,
 }
 failed = [name for name, ok in checks.items() if not ok]
 for name, ok in checks.items():

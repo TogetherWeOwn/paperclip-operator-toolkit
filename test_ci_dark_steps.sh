@@ -1048,7 +1048,7 @@ if [[ -s "$CI" ]]; then
   ACTIONS_READ="$(awk '
     /^permissions:$/ { inperm=1; next }
     inperm && /^[^ ]/ { inperm=0 }
-    inperm && /^  actions: read$/ { found=1 }
+    inperm && /^  actions: read( +#.*)?$/ { found=1 }
     END { print found+0 }
   ' "$CI")"
   [[ "$ACTIONS_READ" == 1 ]]
