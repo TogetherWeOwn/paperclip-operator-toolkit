@@ -237,10 +237,12 @@ reset
 "$Q" submit --requester MGR --template E0_SPECIALIST --title "IRQ Visible" >/dev/null 2>&1
 REQ="$(last_sub)"
 STUBBIN="$TMP/nobin"; mkdir -p "$STUBBIN"
-for b in bash jq sed awk grep cut date cat wc sort head tail tr printf mktemp rm; do
+# Supply the queue's normal utilities, but deliberately omit column. Run away
+# from the checkout and ignore shell startup hooks so missing tools cannot hide.
+for b in bash dirname jq sed awk grep cut date cat wc sort head tail tr printf mktemp rm; do
   p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "$STUBBIN/$b"
 done
-if grep -q "$REQ" <<<"$(PATH="$STUBBIN" "$Q" list --status pending 2>/dev/null)"; then
+if grep -q "$REQ" <<<"$(cd "$TMP" && BASH_ENV=/dev/null PATH="$STUBBIN" "$Q" list --status pending 2>/dev/null)"; then
   ok "list renders the pending queue without util-linux \`column\`"
 else
   bad "list prints nothing when \`column\` is absent — an unusable inbox looks like an empty one"
