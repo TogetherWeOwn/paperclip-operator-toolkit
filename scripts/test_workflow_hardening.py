@@ -120,7 +120,35 @@ class WorkflowHardening(unittest.TestCase):
                 self.assertEqual(data["permissions"], {"contents": "read"})
                 self.assertEqual(data["jobs"][job]["permissions"], expected)
 
+    def assert_gate_invocations(self, data):
+        # This check runs independently of the gate it guards, including from
+        # the unconditional changes job when every heavy job is skipped.
+        for scope in [data] + [data["jobs"][name] for name in ("changes", "offline-suites")]:
+            self.assertIsInstance(scope, dict)
+            self.assertEqual(scope.get("env", {}), {})
+            defaults = scope.get("defaults", {}).get("run", {})
+            self.assertEqual(defaults.get("shell", "bash"), "bash")
+            self.assertEqual(defaults.get("working-directory", "."), ".")
+            self.assertNotIn("continue-on-error", scope)
+        self.assertNotIn("if", data["jobs"]["changes"])
+        self.assertNotIn("needs", data["jobs"]["changes"])
+        for name in ("changes", "offline-suites"):
+            steps = data["jobs"][name]["steps"]
+            matches = [step for step in steps if step.get("name") == "change-gating contract holds"]
+            self.assertEqual(len(matches), 1)
+            step = matches[0]
+            self.assertEqual(step.get("run"), "./test_ci_gating.sh")
+            self.assertNotIn("if", step)
+            self.assertNotIn("continue-on-error", step)
+            self.assertNotIn("uses", step)
+            self.assertEqual(step.get("shell", "bash"), "bash")
+            self.assertEqual(step.get("working-directory", "."), ".")
+            self.assertEqual(step.get("env"), {"PYTHONPATH": "${{ runner.temp }}/static-label-guard-deps"})
+        self.assertIn('\npython3 "$ROOT/scripts/test_ci_execution.py"\n',
+                      (ROOT / "test_ci_gating.sh").read_text())
+
     def test_ci_executes_the_contract_with_the_existing_pinned_parser(self):
+        self.assert_gate_invocations(workflow("ci.yml"))
         steps = workflow("ci.yml")["jobs"]["offline-suites"]["steps"]
         index = next(i for i, step in enumerate(steps)
                      if step.get("run") == "python3 scripts/test_workflow_hardening.py")

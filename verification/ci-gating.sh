@@ -52,6 +52,36 @@ class UniqueKeyLoader(yaml.SafeLoader):
 
 text = Path(sys.argv[1]).read_text()
 
+# Read execution metadata once, rejecting ambiguous or malformed mappings.
+try:
+    workflow = yaml.load(text, Loader=UniqueKeyLoader)
+    if not isinstance(workflow, dict) or not isinstance(workflow.get("jobs"), dict):
+        raise ValueError("workflow jobs must be a mapping")
+    jobs = workflow["jobs"]
+    if not jobs or not all(isinstance(job, dict) for job in jobs.values()):
+        raise ValueError("workflow jobs must contain job mappings")
+    for job in jobs.values():
+        steps = job.get("steps", [])
+        if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
+            raise ValueError("job steps must be mappings")
+except (yaml.YAMLError, ValueError, TypeError) as exc:
+    raise SystemExit(f"FAIL: cannot parse workflow execution properties: {exc}")
+
+
+def needs(scope):
+    value = scope.get("needs", [])
+    return [value] if isinstance(value, str) else value
+
+
+def condition(scope):
+    value = scope.get("if", "")
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if value.startswith("${{") and value.endswith("}}"):
+        value = value[3:-2].strip()
+    return value
+
 # Heavy job -> the outputs.if shape it must carry. Every heavy job tests the
 # single heavy output; the model-selection suite additionally runs unless
 # cancelled, which still names the heavy output.
@@ -90,34 +120,29 @@ for job, body in bodies.items():
     check(f"{job} has a positive timeout",
           re.search(r"(?m)^    timeout-minutes:\s*[1-9][0-9]*\s*$", body) is not None)
 
-for job in HEAVY:
-    body = bodies.get(job)
-    check(f"{job} exists", body is not None)
-    if body is None:
-        continue
-    m = re.search(r"(?m)^    needs:\s*(?P<val>\[.*?\]|\S.*?)\s*$", body)
-    needs_val = m.group("val") if m else ""
-    # Flow (`needs: [changes]`) or block (subsequent `      - changes`).
-    block = "\n".join(
-        line for line in body.splitlines()
-        if re.match(r"^      - ", line))
-    check(f"{job} needs changes",
-          "changes" in needs_val or "changes" in block)
-    im = re.search(r"(?m)^    if:\s*(?P<val>.+?)\s*$", body)
-    if_val = im.group("val") if im else ""
-    check(f"{job} tests the heavy output",
-          "needs.changes.outputs.heavy" in if_val)
+for name in HEAVY:
+    job = jobs.get(name, {})
+    check(f"{name} exists", name in jobs)
+    expected_needs = ["changes"]
+    expected_if = "needs.changes.outputs.heavy == 'true'"
+    if name == "model-selection-suite":
+        expected_needs += ["model-selection-impact", "model-selection-mutants"]
+        expected_if = "!cancelled() && " + expected_if
+    check(f"{name} has the exact admission dependencies", needs(job) == expected_needs)
+    check(f"{name} tests the heavy output", condition(job) == expected_if)
 
 # The model-selection mutants are gated through the impact job, not
 # directly on the detector: pin the chain so a severed link cannot read
 # as a pass.
-mutants = bodies.get("model-selection-mutants")
-check("model-selection-mutants exists", mutants is not None)
-if mutants is not None:
-    check("model-selection-mutants needs model-selection-impact",
-          "model-selection-impact" in mutants)
-    check("model-selection-mutants tests the impact output",
-          "needs.model-selection-impact.outputs.impacted" in mutants)
+mutants = jobs.get("model-selection-mutants", {})
+check("model-selection-mutants exists", "model-selection-mutants" in jobs)
+check("model-selection-mutants needs model-selection-impact",
+      needs(mutants) == ["model-selection-impact"])
+check("model-selection-mutants tests the impact output",
+      condition(mutants) == "needs.model-selection-impact.outputs.impacted == 'true'")
+check("model-selection-impact binds its output to the impact step",
+      jobs.get("model-selection-impact", {}).get("outputs") ==
+      {"impacted": "${{ steps.impact.outputs.impacted }}"})
 
 # The detector itself: always runs (no job-level if), publishes the heavy
 # output, and diffs against the PR base with rename detection disabled. The
@@ -128,11 +153,10 @@ if mutants is not None:
 changes = bodies.get("changes")
 check("changes job exists", changes is not None)
 if changes is not None:
-    check("changes has no job-level if",
-          re.search(r"(?m)^    if:\s*", changes) is None)
+    check("changes has no job-level if or dependencies",
+          "if" not in jobs.get("changes", {}) and needs(jobs.get("changes", {})) == [])
     check("changes publishes the heavy output",
-          re.search(r"(?m)^    outputs:\s*$", changes) is not None
-          and "heavy" in changes)
+          jobs.get("changes", {}).get("outputs") == {"heavy": "${{ steps.detect.outputs.heavy }}"})
     check("changes checkout fetches full history",
           "fetch-depth: 0" in changes)
     check("changes diffs against the PR base, never a bare HEAD range",
@@ -154,18 +178,15 @@ if ciok is not None:
     # !cancelled(), never always(): always() ignores cancellation, so a
     # superseded run's ci-ok queues behind the new head and the PR's
     # concurrency group stalls instead of going red.
-    check("ci-ok runs unless cancelled",
-          re.search(r"(?m)^    if:\s*\$\{\{\s*!cancelled\(\)\s*\}\}\s*$", ciok) is not None)
-    check("ci-ok never uses always()",
-          re.search(r"(?m)^    if:.*always\(\)", ciok) is None)
-    # Pin the needs list items, not substrings: the step body names both
-    # scans in its result loop, so a dropped need would still read as a
-    # pass under a substring check.
-    needs_items = set(re.findall(r"(?m)^      - ([a-zA-Z0-9_-]+)\s*$", ciok))
+    check("ci-ok runs unless cancelled", condition(jobs.get("ci-ok", {})) == "!cancelled()")
+    check("ci-ok never uses always()", "always()" not in condition(jobs.get("ci-ok", {})))
+    # Bind parsed dependencies: a result mentioned in shell or a comment is
+    # not an Actions dependency and cannot contribute to failure propagation.
+    required = HEAVY + ["changes", "secret-scan", "disclosure-scan", "model-selection-mutants"]
+    needs_items = needs(jobs.get("ci-ok", {}))
     check("ci-ok needs every gated job",
-          all(j in needs_items for j in HEAVY + ["changes", "secret-scan",
-                                                "disclosure-scan",
-                                                "model-selection-mutants"]))
+          isinstance(needs_items, list) and len(needs_items) == len(required)
+          and all(j in needs_items for j in required))
 
 # Both scans always run: no needs, no if. A scan that can skip on exactly
 # the docs-only PRs where every heavy suite also skips would let a
@@ -175,10 +196,8 @@ for scan_name, script in (("secret-scan", "secret-scan.sh"),
     scan = bodies.get(scan_name)
     check(f"{scan_name} exists", scan is not None)
     if scan is not None:
-        check(f"{scan_name} has no job-level if",
-              re.search(r"(?m)^    if:\s*", scan) is None)
-        check(f"{scan_name} needs nothing",
-              re.search(r"(?m)^    needs:\s*", scan) is None)
+        check(f"{scan_name} has no job-level if", "if" not in jobs.get(scan_name, {}))
+        check(f"{scan_name} needs nothing", "needs" not in jobs.get(scan_name, {}))
         check(f"{scan_name} runs its scan",
               script in scan)
 
@@ -216,44 +235,116 @@ for cmd in ("./test_sdlc_foundation_placement.sh",
             "./templates/org-github/tests/test_sdlc_foundation.sh"):
     check(f"ci.yml executes {cmd}", cmd in noncomment)
 
-# Parse execution properties instead of matching YAML spelling: quoted keys,
-# folded scalars, inherited shells and duplicate keys affect what Actions runs.
-try:
-    workflow = yaml.load(text, Loader=UniqueKeyLoader)
-    if not isinstance(workflow, dict):
-        raise ValueError("workflow is not a mapping")
-    jobs = workflow.get("jobs")
-    if not isinstance(jobs, dict) or not isinstance(jobs.get("offline-suites"), dict):
-        raise ValueError("offline-suites job is missing or invalid")
-    offline = jobs["offline-suites"]
-    steps = offline.get("steps")
-    if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
-        raise ValueError("offline-suites steps are invalid")
-except (yaml.YAMLError, ValueError, TypeError) as exc:
-    raise SystemExit(f"FAIL: cannot parse workflow execution properties: {exc}")
+# Protect the execution context as well as the command. These jobs run scripts
+# relative to the checkout and must not inherit a different interpreter, import
+# path or startup file. Explicit step data maps are pinned below, not allowlisted
+# by variable name (PATH and BASH_ENV are not the only execution-affecting keys).
+PARSER_ENV = {"PYTHONPATH": "${{ runner.temp }}/static-label-guard-deps"}
+PARSER_INSTALL = '''python3 -m pip install --disable-pip-version-check \\
+  --only-binary=:all: --no-deps --require-hashes \\
+  --target "$RUNNER_TEMP/static-label-guard-deps" \\
+  -r scripts/static-label-guard-requirements.txt'''
 
 
-def default_shell(scope):
+def root_context(scope):
     defaults = scope.get("defaults", {})
-    if not isinstance(defaults, dict):
-        return False
-    run = defaults.get("run", {})
-    return isinstance(run, dict) and ("shell" not in run or run["shell"] == "bash")
+    run = defaults.get("run", {}) if isinstance(defaults, dict) else None
+    return (isinstance(run, dict) and run.get("shell", "bash") == "bash"
+            and run.get("working-directory", ".") == "." and scope.get("env", {}) == {})
 
 
-check("offline-suites cannot swallow job failure", "continue-on-error" not in offline)
-check("workflow and offline-suites use a safe default shell",
-      default_shell(workflow) and default_shell(offline))
-for title, command in (
-        ("Immutable Action references and red/green controls", "python3 scripts/test_action_pins.py"),
-        ("Workflow hardening regression controls", "python3 scripts/test_workflow_hardening.py")):
+def executable(step, env):
+    return ("if" not in step and "continue-on-error" not in step and "uses" not in step
+            and step.get("shell", "bash") == "bash"
+            and step.get("working-directory", ".") == "." and step.get("env", {}) == env)
+
+
+def protected_step(job_name, title, command, env=None):
+    steps = jobs.get(job_name, {}).get("steps", [])
     matches = [step for step in steps if step.get("name") == title]
     step = matches[0] if len(matches) == 1 else {}
-    check(f"offline-suites executes {command}",
-          len(matches) == 1 and step.get("run") == command)
-    check(f"{title} cannot skip or swallow failures",
-          len(matches) == 1 and "if" not in step and "continue-on-error" not in step
-          and ("shell" not in step or step["shell"] == "bash"))
+    check(f"{job_name} executes {title}",
+          len(matches) == 1 and isinstance(step.get("run"), str)
+          and step["run"].strip() == command.strip())
+    check(f"{job_name} {title} cannot redirect, skip or swallow execution",
+          len(matches) == 1 and executable(step, env or {}))
+    return steps.index(step) if len(matches) == 1 else -1
+
+
+check("workflow uses the repository-root execution context", root_context(workflow))
+for name in ("changes", "offline-suites", "secret-scan", "disclosure-scan", "ci-ok"):
+    job = jobs.get(name, {})
+    check(f"{name} cannot redirect or swallow job execution",
+          name in jobs and root_context(job) and "continue-on-error" not in job)
+
+for name in ("changes", "offline-suites"):
+    install = protected_step(name, "Prepare static label parser", PARSER_INSTALL)
+    gate = protected_step(name, "change-gating contract holds", "./test_ci_gating.sh", PARSER_ENV)
+    hardening = protected_step(name, "Workflow hardening regression controls",
+                              "python3 scripts/test_workflow_hardening.py", PARSER_ENV)
+    check(f"{name} prepares the pinned parser before its contracts", 0 <= install < min(gate, hardening))
+    if name == "offline-suites":
+        pins = protected_step(name, "Immutable Action references and red/green controls",
+                              "python3 scripts/test_action_pins.py", PARSER_ENV)
+        check("offline-suites prepares the pinned parser before Action pins", 0 <= install < pins)
+
+# The admission guard has an always-executed caller, outside the heavy job it
+# validates. Bind the published output to the one detector step, not a comment.
+detectors = [step for step in jobs.get("changes", {}).get("steps", []) if step.get("id") == "detect"]
+check("changes has one executable detector with bound inputs",
+      len(detectors) == 1 and isinstance(detectors[0].get("run"), str)
+      and bool(detectors[0]["run"].strip()) and executable(detectors[0], {
+          "EVENT": "${{ github.event_name }}", "DRAFT": "${{ github.event.pull_request.draft }}",
+          "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+          "HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}))
+
+for name, title, command in (
+        ("secret-scan", "Secret suppression positive controls", "python3 scripts/test_secret_scan.py"),
+        ("secret-scan", "gitleaks detect", "bash scripts/secret-scan.sh"),
+        ("disclosure-scan", "Disclosure scan self-test", "bash scripts/test_disclosure_scan.sh"),
+        ("disclosure-scan", "Plugin CI wiring self-test", "python3 scripts/test_plugin_ci_wiring.py"),
+        ("disclosure-scan", "Repo placement classifier self-test", "python3 scripts/test_repo_placement.py"),
+        ("disclosure-scan", "Disclosure scan over plugins/", "bash scripts/disclosure-scan.sh plugins")):
+    protected_step(name, title, command)
+
+# Validate the real aggregation step, not only a directly-executed extraction of
+# its shell. Comments may evolve, but the failure-propagation program is fixed.
+def shell_program(value):
+    if not isinstance(value, str):
+        return ""
+    return "\n".join(line.strip() for line in value.splitlines()
+                     if line.strip() and not line.lstrip().startswith("#"))
+
+
+aggregate = [step for step in jobs.get("ci-ok", {}).get("steps", [])
+             if step.get("name") == "Aggregate gated results"]
+aggregate_env = {
+    "CHANGES_RESULT": "${{ needs.changes.result }}",
+    "DISCLOSURE_RESULT": "${{ needs.disclosure-scan.result }}",
+    "SECRET_RESULT": "${{ needs.secret-scan.result }}",
+    "FAILED": "${{ contains(needs.*.result, 'failure') }}",
+    "CANCELLED": "${{ contains(needs.*.result, 'cancelled') }}",
+}
+check("ci-ok has one mandatory aggregation step",
+      len(aggregate) == 1 and executable(aggregate[0], aggregate_env))
+expected_aggregate = '''set -euo pipefail
+if [ "$CHANGES_RESULT" != 'success' ]; then
+  echo "::error::change detection did not succeed"
+  exit 1
+fi
+for scan in disclosure-scan:"$DISCLOSURE_RESULT" secret-scan:"$SECRET_RESULT"; do
+  if [ "${scan#*:}" != "success" ]; then
+    echo "::error::always-on scan ${scan%%:*} did not succeed (result: ${scan#*:})"
+    exit 1
+  fi
+done
+if [ "$FAILED" = "true" ] || [ "$CANCELLED" = "true" ]; then
+  echo "::error::a needed job failed or was cancelled"
+  exit 1
+fi
+echo "ci-ok: every needed job succeeded or was intentionally skipped"'''
+check("ci-ok executes the failure-propagation program",
+      len(aggregate) == 1 and shell_program(aggregate[0].get("run")) == shell_program(expected_aggregate))
 
 # The drain keeps describing red runs; it must not become a required gate.
 drain = bodies.get("failure-log-drain")

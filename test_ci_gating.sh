@@ -219,3 +219,4 @@ expect_fail duplicate-key "$MUTANT_FILE"
 
 printf '%s passed, %s failed\n' "$pass" "$fail"
 (( fail == 0 ))
+python3 "$ROOT/scripts/test_ci_execution.py"

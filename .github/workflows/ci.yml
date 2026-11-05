@@ -446,6 +446,25 @@ jobs:
             emit true "code, config or a doc a suite reads changed: full run"
           fi
 
+      # Admission must be checked outside the heavy jobs it can skip. Reuse
+      # the existing hash-pinned parser; these controls also run for docs/drafts.
+      - name: Prepare static label parser
+        run: |
+          python3 -m pip install --disable-pip-version-check \
+            --only-binary=:all: --no-deps --require-hashes \
+            --target "$RUNNER_TEMP/static-label-guard-deps" \
+            -r scripts/static-label-guard-requirements.txt
+
+      - name: Workflow hardening regression controls
+        env:
+          PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
+        run: python3 scripts/test_workflow_hardening.py
+
+      - name: change-gating contract holds
+        env:
+          PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
+        run: ./test_ci_gating.sh
+
   privilege-suites:
     name: Privilege ceiling suites
     needs: [changes]

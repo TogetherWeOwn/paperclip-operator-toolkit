@@ -1,8 +1,10 @@
 # Workflow hardening baseline
 
-The workflow hardening contract runs in required Offline suites, using the
-existing hash-pinned PyYAML parser. It complements immutable Action reference
-checks; it is not a substitute for full static analysis.
+The workflow hardening and change-gating contracts run in both the unconditional
+Change detection job and required Offline suites, using the existing hash-pinned
+PyYAML parser. Admission is therefore checked even when heavy suites skip. These
+contracts complement immutable Action reference checks; they are not a substitute
+for full static analysis.
 
 ## Current controls
 
@@ -17,7 +19,18 @@ checks; it is not a substitute for full static analysis.
 - Release-lag and review-trigger keep their existing token grants, but only on
   the jobs that use them. Workflow defaults are read-only. Each non-contents
   permission has an inline explanation.
-- A separate change-gating control rejects removal of the hardening test step.
+- Parsed admission dependencies, predicates and output-to-step bindings reject
+  false conjunctions, inverted tests and comment-only dependency mentions.
+- Mandatory scans, aggregation and contract steps cannot skip or swallow errors,
+  replace the shell, or inherit a different working directory or environment.
+  Complete parsed commands are checked, not merely command-shaped YAML lines.
+- The hardening suite independently guards both change-gating invocations. The
+  execution regression suite includes negative controls for deleting or redirecting
+  either invocation and for every retained review finding.
+
+These are bounded workflow contracts, not a proof against arbitrary changes to
+both a guard and all of its tests in the same commit. Such changes still require
+independent review. Secret and disclosure scanning scopes are unchanged.
 
 Run the focused controls locally:
 

@@ -109,7 +109,8 @@ class PluginWiring(unittest.TestCase):
 
     def test_draft_ci_and_dependency_changes_admit_full_suites(self):
         block = job(self.text, "changes")
-        script = textwrap.dedent(block.split("        run: |\n", 1)[1])
+        detector = block.split("      - id: detect\n", 1)[1]
+        script = textwrap.dedent(detector.split("        run: |\n", 1)[1].split("\n      - ", 1)[0])
         cases = [
             (".github/workflows/ci.yml", "true", "true"),
             ("plugins/model-selection/package-lock.json", "true", "true"),
