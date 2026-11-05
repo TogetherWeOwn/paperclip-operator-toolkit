@@ -42,22 +42,78 @@ class CIExecution(unittest.TestCase):
 
     def test_parser_runtime_matches_the_hashed_wheel(self):
         data = yaml.safe_load(TEXT)
-        block = ("      - name: Python for hash-pinned parser\n"
-                 "        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0\n"
+        block = ("      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0\n"
                  "        with:\n          python-version: '3.12'\n")
         for job in ("changes", "offline-suites"):
             with self.subTest(job=job):
                 matches = [step for step in data["jobs"][job]["steps"]
-                           if step.get("name") == "Python for hash-pinned parser"]
+                           if step.get("uses", "").startswith("actions/setup-python@")]
                 self.assertEqual(len(matches), 1, "hash-pinned parser has no selected Python runtime")
                 self.assertEqual(matches[0].get("with"), {"python-version": "3.12"})
                 start = TEXT.index(f"  {job}:\n")
                 prefix, body = TEXT[:start], TEXT[start:]
                 self.assertIn(block, body)
                 for changed in ("", block.replace("'3.12'", "'3.14'"),
-                                block.replace("        uses:", "        if: false\n        uses:"),
+                                block.replace("      - uses:", "      - if: false\n        uses:"),
                                 block.replace("6d4fd22b20465ccc0f7354476588e8df7c9ca0e0", "v7")):
                     self.rejected(prefix + body.replace(block, changed, 1))
+
+    def test_parser_setup_has_a_recognized_reporter_teardown(self):
+        data = yaml.safe_load(TEXT)
+        for job in ("changes", "offline-suites"):
+            with self.subTest(job=job):
+                runtime = next(step for step in data["jobs"][job]["steps"]
+                               if step.get("uses", "").startswith("actions/setup-python@"))
+                self.assertNotIn("name", runtime,
+                                 "use the default Run actions/ name so its Post Run teardown is recognized")
+                start = TEXT.index(f"  {job}:\n")
+                prefix, body = TEXT[:start], TEXT[start:]
+                self.rejected(prefix + body.replace(
+                    "      - uses: actions/setup-python@",
+                    "      - name: Python for hash-pinned parser\n        uses: actions/setup-python@", 1))
+
+    def test_postgres_bins_are_selected_and_validated_before_startup(self):
+        data = yaml.safe_load(TEXT)
+        for job in ("privilege-suites", "upgrade-offline"):
+            with self.subTest(job=job):
+                steps = data["jobs"][job]["steps"]
+                start = next(step["run"] for step in steps
+                             if step.get("name") == "Start an ephemeral PostgreSQL cluster")
+                preflight = start.split('PGDATA=', 1)[0]
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    bindir = root / "selected-postgres" / "bin"
+                    bindir.mkdir(parents=True)
+                    config = root / "pg_config"
+                    config.write_text(f'#!/bin/sh\nprintf "%s\\n" "{bindir}"\n')
+                    config.chmod(0o755)
+                    env = {"PATH": str(root) + ":/usr/bin:/bin",
+                           "GITHUB_ENV": str(root / "env"), "GITHUB_PATH": str(root / "path")}
+                    (root / "env").touch()
+                    (root / "path").touch()
+                    for tool in ("initdb", "pg_ctl", "createdb", "psql"):
+                        path = bindir / tool
+                        path.write_text("#!/bin/sh\nexit 0\n")
+                        path.chmod(0o755)
+                    result = subprocess.run(["bash", "-c", preflight], env=env, cwd=root,
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f"ORGDB_PGBIN={bindir}\n", (root / "env").read_text())
+                    self.assertEqual((root / "path").read_text(), str(bindir) + "\n")
+                    for tool in ("initdb", "pg_ctl", "createdb", "psql"):
+                        path = bindir / tool
+                        path.chmod(0o644)
+                        result = subprocess.run(["bash", "-c", preflight], env=env, cwd=root,
+                                                capture_output=True, text=True, timeout=5)
+                        self.assertNotEqual(result.returncode, 0, f"missing {tool} was accepted")
+                        path.chmod(0o755)
+                stop = next(step for step in steps
+                            if step.get("name") == "Stop the ephemeral PostgreSQL cluster")
+                self.assertEqual(stop.get("if"), "always()")
+                self.assertIn('"$ORGDB_PGBIN/pg_ctl"', stop["run"])
+                self.assertIn('echo "ORGDB_PGDATA=$PGDATA"', start)
+                self.assertLess(start.index('echo "ORGDB_PGDATA=$PGDATA"'),
+                                start.index('"$PGBIN/pg_ctl"'))
 
     def test_real_workflow_passes(self):
         result = self.gate(TEXT)

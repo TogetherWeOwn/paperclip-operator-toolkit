@@ -7,7 +7,14 @@ contracts complement immutable Action reference checks; they are not a substitut
 for full static analysis. Both jobs explicitly select Python 3.12 with the existing
 immutable setup-python Action, matching the wheel hash in the retained parser
 requirements. Runner-image default Python changes must not select a different
-wheel or lead to a hash exception.
+wheel or lead to a hash exception. Keep the default setup-python step name so its
+runner-generated `Post Run` action remains recognizable to the fail-closed
+step reporter; the execution contract rejects custom names on these two steps.
+
+Database-backed CI jobs select the installed server's binary directory through
+`pg_config --bindir`, require executable server and client tools, and retain the
+same directory for cleanup. They do not assume an older client installation also
+contains a server. Authentication and database proof gates are unchanged.
 
 ## Current controls
 

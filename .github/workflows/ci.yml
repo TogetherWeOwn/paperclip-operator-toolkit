@@ -448,8 +448,8 @@ jobs:
 
       # Admission must be checked outside the heavy jobs it can skip. Reuse
       # the existing hash-pinned parser; these controls also run for docs/drafts.
-      - name: Python for hash-pinned parser
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+      # Keep the default action name: the reporter recognizes Post Run teardown.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.12'
 
@@ -504,8 +504,15 @@ jobs:
       - name: Start an ephemeral PostgreSQL cluster
         run: |
           set -euo pipefail
-          PGBIN=/usr/lib/postgresql/16/bin
+          # Use the runner's installed server, not a client-only older version.
+          PGBIN="$(pg_config --bindir)"
+          for tool in initdb pg_ctl createdb psql; do
+            [[ -x "$PGBIN/$tool" ]] || { echo "Missing PostgreSQL executable: $PGBIN/$tool" >&2; exit 1; }
+          done
+          echo "ORGDB_PGBIN=$PGBIN" >> "$GITHUB_ENV"
+          echo "$PGBIN" >> "$GITHUB_PATH"
           PGDATA="$RUNNER_TEMP/orgdb-pgdata"
+          echo "ORGDB_PGDATA=$PGDATA" >> "$GITHUB_ENV"
           # Ask the kernel for a free port rather than picking one: two jobs on
           # the same host must never choose the same number.
           PGPORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
@@ -522,7 +529,6 @@ jobs:
             -o "-p $PGPORT -h 127.0.0.1 -k $PGDATA" start >/dev/null
           "$PGBIN/createdb" -h 127.0.0.1 -p "$PGPORT" -U "$PGUSER" "$PGDATABASE"
           echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
-          echo "ORGDB_PGDATA=$PGDATA" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
@@ -661,8 +667,8 @@ jobs:
         if: always()
         run: |
           set -u
-          [[ -n "${ORGDB_PGDATA:-}" ]] || exit 0
-          /usr/lib/postgresql/16/bin/pg_ctl -D "$ORGDB_PGDATA" -m immediate stop || true
+          [[ -n "${ORGDB_PGDATA:-}" && -n "${ORGDB_PGBIN:-}" ]] || exit 0
+          "$ORGDB_PGBIN/pg_ctl" -D "$ORGDB_PGDATA" -m immediate stop || true
           rm -rf "$ORGDB_PGDATA"
       # CI verifies policy through the dumb stub. It deliberately cannot prove
       # what the real API now does with reportsTo, permissions, or termination;
@@ -718,8 +724,8 @@ jobs:
       # Keep the guard's PyYAML dependency isolated from the other Python
       # suites and out of the system environment: a per-job directory under
       # RUNNER_TEMP, hash-pinned, with no transitive dependencies.
-      - name: Python for hash-pinned parser
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+      # Keep the default action name: the reporter recognizes Post Run teardown.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.12'
 
@@ -3712,8 +3718,15 @@ jobs:
       - name: Start an ephemeral PostgreSQL cluster
         run: |
           set -euo pipefail
-          PGBIN=/usr/lib/postgresql/16/bin
+          # Use the runner's installed server, not a client-only older version.
+          PGBIN="$(pg_config --bindir)"
+          for tool in initdb pg_ctl createdb psql; do
+            [[ -x "$PGBIN/$tool" ]] || { echo "Missing PostgreSQL executable: $PGBIN/$tool" >&2; exit 1; }
+          done
+          echo "ORGDB_PGBIN=$PGBIN" >> "$GITHUB_ENV"
+          echo "$PGBIN" >> "$GITHUB_PATH"
           PGDATA="$RUNNER_TEMP/upgrade-pgdata"
+          echo "ORGDB_PGDATA=$PGDATA" >> "$GITHUB_ENV"
           rm -rf "$PGDATA"
           install -d -m 700 "$PGDATA"
           "$PGBIN/initdb" -D "$PGDATA" -U agent_test --auth-host=trust --auth-local=trust >/dev/null
@@ -3732,10 +3745,9 @@ jobs:
         if: always()
         run: |
           set -u
-          PGBIN=/usr/lib/postgresql/16/bin
-          PGDATA="$RUNNER_TEMP/upgrade-pgdata"
-          "$PGBIN/pg_ctl" -D "$PGDATA" -m immediate stop || true
-          rm -rf "$PGDATA"
+          [[ -n "${ORGDB_PGDATA:-}" && -n "${ORGDB_PGBIN:-}" ]] || exit 0
+          "$ORGDB_PGBIN/pg_ctl" -D "$ORGDB_PGDATA" -m immediate stop || true
+          rm -rf "$ORGDB_PGDATA"
 
   # TOG-2951. These two steps accounted for ~69.8 minutes of the 102-minute
   # Offline suites runtime. Keeping them in a separate required job lets the

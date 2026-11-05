@@ -279,12 +279,13 @@ for name in ("changes", "offline-suites", "secret-scan", "disclosure-scan", "ci-
 
 for name in ("changes", "offline-suites"):
     steps = jobs.get(name, {}).get("steps", [])
-    runtimes = [step for step in steps if step.get("name") == "Python for hash-pinned parser"]
+    runtimes = [step for step in steps if step.get("uses", "").startswith("actions/setup-python@")]
     runtime = runtimes[0] if len(runtimes) == 1 else {}
     check(f"{name} selects the runtime for the hashed parser wheel",
           len(runtimes) == 1
           and runtime.get("uses") == "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0"
           and runtime.get("with") == {"python-version": "3.12"}
+          and "name" not in runtime
           and "if" not in runtime and "continue-on-error" not in runtime and "run" not in runtime
           and runtime.get("env", {}) == {})
     install = protected_step(name, "Prepare static label parser", PARSER_INSTALL)
