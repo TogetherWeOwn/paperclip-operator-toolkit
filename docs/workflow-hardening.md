@@ -4,7 +4,10 @@ The workflow hardening and change-gating contracts run in both the unconditional
 Change detection job and required Offline suites, using the existing hash-pinned
 PyYAML parser. Admission is therefore checked even when heavy suites skip. These
 contracts complement immutable Action reference checks; they are not a substitute
-for full static analysis.
+for full static analysis. Both jobs explicitly select Python 3.12 with the existing
+immutable setup-python Action, matching the wheel hash in the retained parser
+requirements. Runner-image default Python changes must not select a different
+wheel or lead to a hash exception.
 
 ## Current controls
 

@@ -448,6 +448,11 @@ jobs:
 
       # Admission must be checked outside the heavy jobs it can skip. Reuse
       # the existing hash-pinned parser; these controls also run for docs/drafts.
+      - name: Python for hash-pinned parser
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+
       - name: Prepare static label parser
         run: |
           python3 -m pip install --disable-pip-version-check \
@@ -713,6 +718,11 @@ jobs:
       # Keep the guard's PyYAML dependency isolated from the other Python
       # suites and out of the system environment: a per-job directory under
       # RUNNER_TEMP, hash-pinned, with no transitive dependencies.
+      - name: Python for hash-pinned parser
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+
       - name: Prepare static label parser
         run: |
           python3 -m pip install --disable-pip-version-check \

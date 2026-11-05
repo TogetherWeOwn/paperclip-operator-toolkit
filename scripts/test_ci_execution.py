@@ -40,6 +40,25 @@ class CIExecution(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("FAIL:", result.stdout + result.stderr)
 
+    def test_parser_runtime_matches_the_hashed_wheel(self):
+        data = yaml.safe_load(TEXT)
+        block = ("      - name: Python for hash-pinned parser\n"
+                 "        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0\n"
+                 "        with:\n          python-version: '3.12'\n")
+        for job in ("changes", "offline-suites"):
+            with self.subTest(job=job):
+                matches = [step for step in data["jobs"][job]["steps"]
+                           if step.get("name") == "Python for hash-pinned parser"]
+                self.assertEqual(len(matches), 1, "hash-pinned parser has no selected Python runtime")
+                self.assertEqual(matches[0].get("with"), {"python-version": "3.12"})
+                start = TEXT.index(f"  {job}:\n")
+                prefix, body = TEXT[:start], TEXT[start:]
+                self.assertIn(block, body)
+                for changed in ("", block.replace("'3.12'", "'3.14'"),
+                                block.replace("        uses:", "        if: false\n        uses:"),
+                                block.replace("6d4fd22b20465ccc0f7354476588e8df7c9ca0e0", "v7")):
+                    self.rejected(prefix + body.replace(block, changed, 1))
+
     def test_real_workflow_passes(self):
         result = self.gate(TEXT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
