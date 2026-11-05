@@ -278,7 +278,18 @@ for name in ("changes", "offline-suites", "secret-scan", "disclosure-scan", "ci-
           name in jobs and root_context(job) and "continue-on-error" not in job)
 
 for name in ("changes", "offline-suites"):
+    steps = jobs.get(name, {}).get("steps", [])
+    runtimes = [step for step in steps if step.get("name") == "Python for hash-pinned parser"]
+    runtime = runtimes[0] if len(runtimes) == 1 else {}
+    check(f"{name} selects the runtime for the hashed parser wheel",
+          len(runtimes) == 1
+          and runtime.get("uses") == "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0"
+          and runtime.get("with") == {"python-version": "3.12"}
+          and "if" not in runtime and "continue-on-error" not in runtime and "run" not in runtime
+          and runtime.get("env", {}) == {})
     install = protected_step(name, "Prepare static label parser", PARSER_INSTALL)
+    check(f"{name} selects Python before installing the parser",
+          len(runtimes) == 1 and 0 <= steps.index(runtime) < install)
     gate = protected_step(name, "change-gating contract holds", "./test_ci_gating.sh", PARSER_ENV)
     hardening = protected_step(name, "Workflow hardening regression controls",
                               "python3 scripts/test_workflow_hardening.py", PARSER_ENV)
