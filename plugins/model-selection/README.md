@@ -672,7 +672,9 @@ quality eligibility returns no later than 21 days after the final closure (at
 most seven days after that closure matures). This restores ordinary eligibility,
 not guaranteed traffic: capability, lane and other safety gates still apply.
 The policy does not override pins, force probes, or enable the dormant earn-in
-scheduler. A mature accepted card also lifts the zero-accept exclusion.
+scheduler. A mature accepted card also lifts the zero-accept exclusion once a
+refreshed ledger includes it; until refresh or expiry, selection may continue to
+use cached zero-accept evidence.
 
 #### Observation completeness and early maturity
 
@@ -696,7 +698,8 @@ validation and decision-time expiry above remain unchanged. Eight rapid rejects
 cannot replace that cohort, and correlated observations support no
 independence-based probability guarantee. Cache refresh cannot renew expiry at
 the oldest cohort closure +21 days; a mature accepted card removes zero-accept
-exclusion. Mature evidence still has seven days of utility.
+exclusion once included in a refreshed ledger, not merely as time passes between
+refreshes. Mature evidence still has seven days of utility.
 
 No supported early-maturity mapping or shorter empirical horizon has been
 established: outcome completeness remains **UNKNOWN; acceleration is NO-GO**.
