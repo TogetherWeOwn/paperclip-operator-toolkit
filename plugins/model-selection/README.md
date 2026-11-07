@@ -672,7 +672,49 @@ quality eligibility returns no later than 21 days after the final closure (at
 most seven days after that closure matures). This restores ordinary eligibility,
 not guaranteed traffic: capability, lane and other safety gates still apply.
 The policy does not override pins, force probes, or enable the dormant earn-in
-scheduler. A mature accepted card also lifts the zero-accept exclusion.
+scheduler. A mature accepted card also lifts the zero-accept exclusion once a
+refreshed ledger includes it; until refresh or expiry, selection may continue to
+use cached zero-accept evidence.
+
+#### Observation completeness and early maturity
+
+The 14-day censor interval is the current conservative delayed-outcome policy
+proxy, not an empirically established complete or maximum outcome lag. The
+72-hour reopen and 48-hour rejection attribution windows do not prove coverage.
+A successful run, card closure, PR merge, early rejection, processing receipt or
+allowance watermark does not certify discharged independent review, deliverable
+and delayed-rework obligations, or a complete outcome feed.
+
+Reporting is not quality exclusion. `cardsClosed` includes censored work;
+reporting `cardsResolved` can count immediate rejects while other rows remain
+censored. Reporting `cardsAccepted` means resolved without an observed
+rejection/reopen, not explicit independent acceptance. `pending: false` means
+measured resolved work, not completeness. `qualityCohort.observedAtMs` is a ledger
+snapshot timestamp, not a feed-completeness watermark.
+
+The symmetric **[14, 21)-day**, same-model/same-tier cohort, eight-mature-card
+minimum, zero-accept reporting/non-pending evidence, identity/count/subset/timestamp
+validation and decision-time expiry above remain unchanged. Eight rapid rejects
+cannot replace that cohort, and correlated observations support no
+independence-based probability guarantee. Cache refresh cannot renew expiry at
+the oldest cohort closure +21 days; a mature accepted card removes zero-accept
+exclusion once included in a refreshed ledger, not merely as time passes between
+refreshes. Mature evidence still has seven days of utility.
+
+No supported early-maturity mapping or shorter empirical horizon has been
+established: outcome completeness remains **UNKNOWN; acceleration is NO-GO**.
+Earlier resolution would require an outcome-independent, predeclared attributable
+closure cohort, native finalization for **both** accepts and rejects covering all
+applicable independent review, deliverable and delayed-rework obligations, and
+relevant-feed completeness through a trustworthy watermark. Missing cohort
+members cannot disappear to select rejects while potential accepts remain
+censored. Fourteen silent days do not manufacture missing telemetry.
+
+Any future event-based alternative is an **unimplemented**, separately justified
+and reviewed behavior change. This clarification enables no new expiry clock,
+default, selector behavior, grant or empirical threshold. Expiry restores only
+ordinary quality eligibility: it forces no probe or traffic, bypasses no pin,
+capability, lane, security or admission gate, and enables no dormant earn-in.
 
 ---
 
