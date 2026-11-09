@@ -166,7 +166,9 @@ class ConcurrentSubmissionDiagnostics(unittest.TestCase):
             fake_bin.mkdir()
             if permissive_mkdir:
                 shim = fake_bin / "mkdir"
-                shim.write_text('#!/bin/bash\nexec /usr/bin/mkdir -p "$@"\n')
+                # The parent deliberately poisons BASH_ENV. Keep the PATH fake
+                # usable for harness setup as well as the isolated child.
+                shim.write_text('#!/bin/sh\nexec /usr/bin/mkdir -p "$@"\n')
                 shim.chmod(0o700)
             if rejected_tracer:
                 tracer = fake_bin / "strace"
@@ -200,6 +202,7 @@ class ConcurrentSubmissionDiagnostics(unittest.TestCase):
                      "TRACE_SECRET_CANARY": "must-not-reach-child-trace"},
                 capture_output=True, text=True, timeout=15,
             )
+            self.assertTrue(saved_dir.is_dir(), result.stdout + result.stderr)
             saved = {p.name: p.read_text() for p in saved_dir.iterdir()}
         return result, saved
 
