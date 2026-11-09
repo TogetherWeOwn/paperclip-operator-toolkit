@@ -1081,7 +1081,25 @@ jobs:
       # bolted onto the one above. Same two offline seams (ORG_SNAPSHOT and a
       # stub PROV), so it needs no database and no credential either.
       - name: request-record integrity suite
-        run: ./test_request_record_integrity.sh
+        env:
+          REQUEST_RECORD_DIAGNOSTICS_DIR: ${{ runner.temp }}/request-record-diagnostics
+          REQUEST_RECORD_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          mkdir -p "$REQUEST_RECORD_DIAGNOSTICS_DIR"
+          printf 'head=%s\ncheckout=%s\nrun=%s\nattempt=%s\njob=%s\n' \
+            "$REQUEST_RECORD_HEAD_SHA" "$(git rev-parse HEAD)" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB" > "$REQUEST_RECORD_DIAGNOSTICS_DIR/context.txt"
+          ./test_request_record_integrity.sh
+
+      - name: Retain concurrent-submission experiment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: request-record-diagnostics-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/request-record-diagnostics/*
+          if-no-files-found: ignore
+          retention-days: 7
 
       # TOG-254. A third question again: the first two ask who may decide and
       # whether the record survives, this one asks whether the REQUESTER ever
@@ -3766,6 +3784,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Mutation diagnostic regression controls
+        run: python3 -I test_mutation_diagnostics.py
+
       # A suite that cannot fail is decoration. Each mutation step below
       # reintroduces a REAL past defect into a THROWAWAY COPY — never a tracked
       # file — and requires the suite to reject it.
@@ -3821,7 +3842,8 @@ jobs:
           baseline_root="$(mktemp -d)"
           trap 'rm -rf "$baseline_root"' EXIT
           baseline_template() {
-            local suite="$1" key="${suite//[^A-Za-z0-9_.-]/_}"
+            local suite="$1"
+            local key="${suite//[^A-Za-z0-9_.-]/_}"
             local dir="$baseline_root/$key" output="$baseline_root/$key.out"
             if [[ ! -e "$dir/.baseline-passed" ]]; then
               mkdir -p "$dir"; stage "$dir"
@@ -3835,18 +3857,41 @@ jobs:
                 fi
                 grep -E 'FAIL|RESULT' "$output" >&2 || true
                 tail -20 "$output" >&2
-                return 1
+                return "$base_rc"
               fi
               : > "$dir/.baseline-passed"
             fi
             BASELINE_TEMPLATE="$dir"
           }
 
+          # Only offline fixture output is retained. Keep the console bounded,
+          # but preserve the full transcript before the mutant directory is gone.
+          mutation_diagnostic() {
+            local label="$1" phase="$2" suite="$3" result="$4" output="$5"
+            local saved="$RUNNER_TEMP/mutation-diagnostics/$label-$phase.log"
+            mkdir -p "$(dirname "$saved")"
+            cp "$output" "$saved"
+            echo "::group::$label $phase: $suite (rc=$result)"
+            tail -c 16384 "$output" | tail -n 80
+            echo "::endgroup::"
+          }
+
           mutation_check() {
             local label="$1" suite="$2" sibling="$3"; shift 3
             baseline_template "$suite" || {
+              local owner_base_rc=$?
+              mutation_diagnostic "$label" owner-baseline "$suite" "$owner_base_rc" "$baseline_root/$suite.out"
               echo "::error::$label: no verified baseline for $suite"; return 1; }
-            local baseline="$BASELINE_TEMPLATE"
+            local baseline="$BASELINE_TEMPLATE" other=test_responsible_leader.sh
+            if [[ "$sibling" != "skip" ]]; then
+              [ "$suite" = "$other" ] && other=test_request_record_integrity.sh
+              baseline_template "$other" || {
+                local other_base_rc=$?
+                mutation_diagnostic "$label" sibling-baseline "$other" "$other_base_rc" "$baseline_root/$other.out"
+                echo "::error::$label: sibling baseline failed; no mutation attribution is possible"
+                return 1
+              }
+            fi
             local mut; mut="$(mktemp -d "$baseline_root/mutant.XXXXXX")"
             cp -a "$baseline/." "$mut/"
             local assertion_sentinel="" required_assertion="" assertion_armed=""
@@ -3917,6 +3962,7 @@ jobs:
             local mut_rc=$?
             if [[ $mut_rc -eq 0 ]]; then
               echo "::error::$label: $suite PASSED against the mutation"
+              mutation_diagnostic "$label" owner "$suite" "$mut_rc" "$mutant_output"
               rm -rf "$mut"; return 1
             elif [[ -n "$required_assertion" ]]; then
               if grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
@@ -3943,21 +3989,20 @@ jobs:
             # suite is actually carrying the weight, so the two cannot quietly
             # collapse into one.
             if [ "$sibling" != "skip" ]; then
-              local other=test_responsible_leader.sh
-              [ "$suite" = "$other" ] && other=test_request_record_integrity.sh
-              mutation_suite "$mut" "$other" >/dev/null 2>&1
+              local sibling_output="$mut/.sibling-output"
+              MUTATION_SUITE_OUTPUT="$sibling_output" mutation_suite "$mut" "$other"
               local other_rc=$?
-              if [[ $other_rc -eq 0 ]]; then
-                [ "$sibling" = "yes" ] && {
-                  echo "::error::$label: expected $other to catch this too, and it did not"; rm -rf "$mut"; return 1; }
-              else
+              if [[ $other_rc -eq 124 || $other_rc -eq 137 ]] \
+                || [[ $other_rc -eq 0 && "$sibling" = "yes" ]] \
+                || [[ $other_rc -ne 0 && "$sibling" = "no" ]]; then
+                mutation_diagnostic "$label" owner "$suite" "$mut_rc" "$mutant_output"
+                mutation_diagnostic "$label" sibling "$other" "$other_rc" "$sibling_output"
                 if [[ $other_rc -eq 124 || $other_rc -eq 137 ]]; then
                   echo "::error::$label: sibling $other hit the OUTER deadline; this cross-check is not attributable"
-                  rm -rf "$mut"; return 1
+                else
+                  echo "::error::$label: sibling $other returned rc=$other_rc (expected detection=$sibling); inspect its transcript before attributing a detection"
                 fi
-                [ "$sibling" = "no" ] && {
-                  echo "::error::$label: $other also catches this, so it does not show $suite carries its own weight"
-                  rm -rf "$mut"; return 1; }
+                rm -rf "$mut"; return 1
               fi
             fi
             rm -rf "$mut"
@@ -4280,6 +4325,15 @@ jobs:
             's/^if (( MSG_BYTES > MAX_COMMENT_BYTES )); then/if false; then/' || rc=1
 
           exit $rc
+
+      - name: Retain unexpected mutation transcripts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-diagnostics-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/mutation-diagnostics/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       # TOG-358. The preflight's whole job is to refuse to say "ok" about an
       # endpoint it could not actually use. Each mutation below reintroduces one
