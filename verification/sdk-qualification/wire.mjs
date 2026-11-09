@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 import { inspectConsumer } from './consumer.mjs';
 import { workerBridge } from './worker-bridge.mjs';
 
@@ -163,8 +164,40 @@ if (manifest.id.includes('cliproxy-insight')) {
 }
 
 assert.equal(results.length, manifest.id.includes('cliproxy-insight') ? 7 : 2, 'Partial fixture run');
+
+// Supply an actual signal via a separate tiny worker importing this consumer's
+// SDK. Neither the current plugin nor JSON alone is a signal-loss control.
+const signalResults = [];
+const signalCalls = [];
+const signalWorker = fileURLToPath(new URL('./signal-worker.mjs', import.meta.url));
+const signalBridge = workerBridge(signalWorker, root, async ({ method, params }, reply) => {
+  assert.equal(method, 'http.fetch');
+  assert.deepEqual(params, {
+    url: 'https://fixture.invalid/signal',
+    init: { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'tiny-signal-control' },
+  }, 'Held SDK must serialize the supported fields and omit AbortSignal');
+  signalCalls.push(method);
+  reply({ status: 200, statusText: 'OK', headers: {}, body: 'inert-host-response' });
+}, [signalWorker, consumer.sdk]);
+try {
+  const initialized = await signalBridge.request('initialize', initialize);
+  assert.equal(initialized.ok, true);
+  assert(initialized.supportedMethods.includes('handleApiRequest'));
+  for (const mode of ['normal', 'pre-aborted', 'abort-after-send']) {
+    const before = signalCalls.length;
+    const result = await signalBridge.request('handleApiRequest', { mode });
+    assert.deepEqual(result, { status: 200, body: 'inert-host-response', aborted: mode !== 'normal' });
+    assert.equal(signalCalls.length, before + 1, 'Even an aborted local signal reaches the inert host');
+    signalResults.push(mode);
+  }
+  signalBridge.assertHealthy();
+} finally {
+  await signalBridge.close();
+}
+assert.equal(signalResults.length, 3, 'Partial signal probe');
 console.log(JSON.stringify({ ...consumer.report, wire: { results,
   boundary: 'Real built worker/SDK subprocess with inert service replies; NOT stock scheduler or authorization.',
   stockScheduler: 'not exercised', capabilityDenial: 'not exercised',
-  abortSignal: 'Current plugin sends none; no cancellation claim.',
+  abortSignal: { boundary: 'Separate synthetic worker using consumer-resolved SDK', results: signalResults,
+    serialized: false, localAbortPreventsHostCall: false },
   hostCancellation: false, stockHostQualified: false } }, null, 2));

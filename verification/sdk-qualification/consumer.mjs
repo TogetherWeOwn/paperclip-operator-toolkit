@@ -34,10 +34,17 @@ export async function inspectConsumer(pluginRoot) {
     assert(lockPath.startsWith('node_modules/') && !lockPath.split('/').includes('..'), 'Resolution escaped consumer install');
     assert.equal(identity.manifest.version, expected[name], `Unexpected ${name} consumer version`);
     assert.equal(lock.packages[lockPath]?.version, expected[name], 'Installed version differs from this consumer lock');
-    assert.match(lock.packages[lockPath]?.integrity ?? '', /^sha512-/, 'Missing registry integrity');
+    const integrity = lock.packages[lockPath].integrity ?? null;
+    // The held Insight lock omits these fields. Record that adverse baseline;
+    // do not manufacture provenance or silently relax the other consumer's gate.
+    if (source.name === '@togetherweown/paperclip-cliproxy-insight') {
+      assert.equal(integrity, null, 'Held Insight lock metadata changed; review its provenance separately');
+    } else {
+      assert.match(integrity ?? '', /^sha512-/, 'Missing registry integrity');
+    }
     edges.push({ name, parent: relative(root, parent), entry: relative(root, entry),
       lockPath, version: identity.manifest.version, engines: identity.manifest.engines ?? null,
-      integrity: lock.packages[lockPath].integrity });
+      integrity });
     return entry;
   }
   const sdk = await edge('@paperclipai/plugin-sdk', worker);
@@ -69,8 +76,9 @@ export async function inspectConsumer(pluginRoot) {
     const { z } = await import(pathToFileURL(entry).href);
     counters.push({ entry: relative(root, entry), version: '3.25.76', results: await collectionCounters(z, 3) });
   }
-  return { root, worker, manifest, report: { plugin: source.name, node: process.versions.node,
+  return { root, worker, manifest, sdk, report: { plugin: source.name, node: process.versions.node,
     buildTarget: 'node22 (unchanged)', sourceEngine: source.engines.node, edges, counters,
+    lockIntegrityFieldsComplete: edges.every(({ integrity }) => integrity !== null),
     manifestValidated: true, stockHostQualified: false, migrationQualified: false,
     candidate: { sdk: '2026.831.0', shared: '2026.831.0', zod: '4.6.7',
       node22DropIn: false, requiredNode: '>=24.11.0', installed: false } } };

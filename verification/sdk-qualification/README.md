@@ -33,8 +33,13 @@ all relevant lock copies with the narrow held allowlist:
 This is intentionally not a generic override allowlist. Unexpected versions fail
 rather than silently changing the experiment. The installed identities are
 compared with the lock used by the clean Actions install; printing a lock
-integrity alone is not an independent installed-file integrity audit. Host Zod,
-CommonJS resolution and `NODE_PATH` cannot stand in for these edges.
+integrity alone is not an independent installed-file integrity audit. The held
+Insight lock has no registry integrity fields for SDK/shared/Zod: its report
+records `integrity: null` and `lockIntegrityFieldsComplete: false`. This is an
+explicit adverse baseline, not provenance acceptance or a candidate-install
+allowlist. Model-selection's lock must retain its SHA-512 fields. Neither lock
+is edited by the fixture. Host Zod, CommonJS resolution and `NODE_PATH` cannot
+stand in for these edges.
 
 The actual shared validator parses each built API-version1 manifest separately
 from worker initialization. The default model-selection artifact must omit
@@ -70,7 +75,17 @@ Insight, additional cases require:
   report timeout without `poll_ok`, and still answer a health request. The
   fixture then settles the deferred reply and reaps the child. It does **not**
   assert cancellation of host work. The current plugin does not send an
-  AbortSignal, so this case makes no claim to test signal dropping in the SDK.
+  AbortSignal, so this case alone cannot test signal dropping in the SDK.
+
+A separate tiny `signal-worker.mjs` imports the exact SDK entry resolved from
+that built consumer. It supplies a real AbortSignal with a small POST body and
+checks three cases: normal, pre-aborted and aborted immediately after dispatch.
+The inert host must receive exactly method/headers/body without a signal, and
+all three calls must return its response, including the two locally aborted
+signals. This measures the held SDK serializer, not the production plugin's
+choice to omit a signal, stock HTTP cancellation, network access or stock
+capability authorization. No external request occurs. A green result records
+signal loss; it does not fix it or establish host cancellation.
 
 Company fixtures are distinct valid GUIDs. These are **plugin/wire negative
 controls**, not proof of stock scheduler, worker-manager or authorization gates.
@@ -94,8 +109,8 @@ capability-denial behavior. Reports explicitly set `stockHostQualified` and
   inert adapters. Prove same-company success and denied-capability, missing
   identity and cross-company zero unauthorized effects there. This wire harness
   cannot substitute for it.
-- Exercise actual host config-save/Ajv and manifest-load paths, and separately
-  characterize AbortSignal serialization. HTTP byte caps, a post-readline
+- Exercise actual host config-save/Ajv and manifest-load paths, and obtain Actions
+  results for the separate AbortSignal serializer probe. HTTP byte caps, a post-readline
   character guard, pre-JSON allocation, collection/key/depth bounds and
   pre-Zod traversal are different boundaries. No complete containment is claimed.
 - Zod4 early size rejection leaves unbounded schemas unchanged. Source migration
