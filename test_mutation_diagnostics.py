@@ -169,11 +169,11 @@ class MutationDiagnostics(unittest.TestCase):
 
     def test_exceptional_assertion_exits_retain_available_transcripts(self):
         label = "transport-can-ignore-timeout-term"
-        for outcome in ("baseline-failed", "missing-baseline", "passing-mutant",
+        for outcome in ("baseline-failed", "missing-baseline", "passing-mutant", "zero-exit",
                         "unarmed-mutant", "uncleaned-mutant", "wrong-exit"):
             with self.subTest(outcome=outcome):
                 baseline = 0
-                owner = 1 if outcome == "wrong-exit" else 124
+                owner = {"zero-exit": 0, "wrong-exit": 1}.get(outcome, 124)
                 result, saved = self.run_gate(
                     expected="skip", owner=owner, owner_baseline=baseline, assertion=outcome)
                 self.assertEqual(result.returncode, 1)
@@ -400,13 +400,17 @@ class ExecutableIdentityDiagnostics(unittest.TestCase):
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             ) as child:
                 try:
+                    self.assertTrue(select.select([child.stdout], [], [], 5)[0], "image startup timed out")
                     self.assertEqual(child.stdout.readline(), b"ready\n")
                     replacement = Path(temp) / "replacement"
                     shutil.copyfile("/usr/bin/true", replacement)
                     replacement.replace(image)
-                    for state in ("replaced", "unlinked"):
+                    for state in ("replaced", "unlinked", "canonical-loop"):
                         if state == "unlinked":
                             image.unlink()
+                        elif state == "canonical-loop":
+                            link = Path(str(image) + " (deleted)")
+                            link.symlink_to(link.name)
                         with self.subTest(state=state):
                             record = observer.identity(f"/proc/{child.pid}/exe", executable=True)
                             self.assertNotIn("error", record)
@@ -415,6 +419,8 @@ class ExecutableIdentityDiagnostics(unittest.TestCase):
                             self.assertEqual(record["device"], expected_stat.st_dev)
                             self.assertEqual(record["format"], "ELF")
                             self.assertEqual(record["symlink_target"], str(image) + " (deleted)")
+                            if state == "canonical-loop":
+                                self.assertIn("canonical_error", record)
                     # Ordinary paths must still detect changed bytes; no hash cache.
                     shutil.copyfile("/usr/bin/true", image)
                     self.assertNotEqual(observer.identity(image, executable=True)["sha256"], expected_hash)

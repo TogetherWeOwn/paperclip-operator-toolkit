@@ -3971,7 +3971,11 @@ jobs:
             local mut_rc=$?
             if [[ $mut_rc -eq 0 ]]; then
               echo "::error::$label: $suite PASSED against the mutation"
-              mutation_diagnostic "$label" owner "$suite" "$mut_rc" "$mutant_output"
+              if [[ -n "$required_assertion" ]]; then
+                mutation_assertion_diagnostic "$label" "$suite" "$mut_rc" "$mut" "$base_rc"
+              else
+                mutation_diagnostic "$label" owner "$suite" "$mut_rc" "$mutant_output"
+              fi
               rm -rf "$mut"; return 1
             elif [[ -n "$required_assertion" ]]; then
               if grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then

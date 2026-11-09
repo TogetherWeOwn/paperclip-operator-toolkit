@@ -16,9 +16,6 @@ def identity(path, *, executable=False, interpreter=True):
     try:
         # A proc executable link can name an unlinked image. Open the handle,
         # never its readlink/realpath text, and stat/hash that same open image.
-        if Path(path).is_symlink():
-            result["symlink_target"] = os.readlink(path)
-        result["canonical"] = str(Path(path).resolve(strict=False))
         if executable:
             with open(path, "rb") as stream:
                 stat = os.fstat(stream.fileno())
@@ -47,6 +44,16 @@ def identity(path, *, executable=False, interpreter=True):
         result["shebang_error"] = str(error)
     except (OSError, RuntimeError) as error:
         result["error"] = str(error)
+    # Textual metadata is best-effort and must not suppress handle identity.
+    try:
+        if Path(path).is_symlink():
+            result["symlink_target"] = os.readlink(path)
+    except OSError as error:
+        result["symlink_error"] = str(error)
+    try:
+        result["canonical"] = str(Path(path).resolve(strict=False))
+    except (OSError, RuntimeError) as error:
+        result["canonical_error"] = str(error)
     return result
 
 
