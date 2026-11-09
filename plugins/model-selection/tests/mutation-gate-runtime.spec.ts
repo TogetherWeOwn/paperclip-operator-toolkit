@@ -98,7 +98,7 @@ describe("mutation gate runtime controls", () => {
       const result = probe(`
       import { mutationGateVitestInvocation } from ${JSON.stringify(runtime)};
       const invocation = mutationGateVitestInvocation(${JSON.stringify(env)});
-      console.log(JSON.stringify({ args: invocation.args, forks: invocation.env.VITEST_MAX_FORKS, threads: invocation.env.VITEST_MAX_THREADS }));
+      console.log(JSON.stringify({ args: invocation.args, forks: invocation.env.VITEST_MAX_FORKS, threads: invocation.env.VITEST_MAX_THREADS, workers: invocation.env.VITEST_MAX_WORKERS }));
     `);
 
       expect(result).toEqual({
@@ -107,12 +107,11 @@ describe("mutation gate runtime controls", () => {
           "run",
           "--cache=false",
           "--pool=forks",
-          "--poolOptions.forks.maxForks=2",
-          "--poolOptions.forks.minForks=1",
           "--maxWorkers=2",
         ],
         forks: "2",
         threads: "2",
+        workers: "2",
       });
     },
   );
@@ -134,7 +133,7 @@ describe("mutation gate runtime controls", () => {
       console.log(JSON.stringify(invocation.args));
     `) as string[];
 
-    expect(result).toContain("--poolOptions.forks.maxForks=2");
+    expect(result.some(arg => arg.includes("poolOptions"))).toBe(false);
     expect(result).toContain("--maxWorkers=2");
   });
 
@@ -164,9 +163,9 @@ describe("mutation gate runtime controls", () => {
       const label = JSON.stringify(envs[index]);
       expect(args, `${label} did not pin the forks pool`).toContain("--pool=forks");
       expect(
-        args.filter((arg) => /^--poolOptions\.forks\.maxForks=[1-9]\d*$/.test(arg)),
-        `${label} produced an uncapped invocation`,
-      ).toHaveLength(1);
+        args.filter((arg) => /poolOptions|minWorkers/.test(arg)),
+        `${label} produced a removed Vitest option`,
+      ).toHaveLength(0);
       expect(
         args.filter((arg) => /^--maxWorkers=[1-9]\d*$/.test(arg)),
         `${label} produced an unbounded worker count`,
@@ -175,39 +174,40 @@ describe("mutation gate runtime controls", () => {
   });
 
   it.each([
-    { CI: "true", VITEST_MAX_FORKS: "3", VITEST_MAX_THREADS: "4" },
+    { CI: "true", VITEST_MAX_FORKS: "3", VITEST_MAX_THREADS: "4", VITEST_MAX_WORKERS: "99" },
     { MUTATION_GATE_LOCAL: "1", VITEST_MAX_FORKS: "5", VITEST_MAX_THREADS: "6" },
   ])("preserves configured Vitest limits: %o", (env) => {
     const result = probe(`
       import { mutationGateVitestInvocation } from ${JSON.stringify(runtime)};
       const invocation = mutationGateVitestInvocation(${JSON.stringify(env)});
-      console.log(JSON.stringify({ args: invocation.args, forks: invocation.env.VITEST_MAX_FORKS, threads: invocation.env.VITEST_MAX_THREADS }));
+      console.log(JSON.stringify({ args: invocation.args, forks: invocation.env.VITEST_MAX_FORKS, threads: invocation.env.VITEST_MAX_THREADS, workers: invocation.env.VITEST_MAX_WORKERS }));
     `);
 
-    // Vitest 2.1.9 does read these variables, but VITEST_MAX_FORKS only
-    // populates poolOptions.forks -- and the resolved pool defaults to
-    // "threads", which this plugin's config does not override. Passing the
-    // value through the environment therefore caps a pool that never runs, so
-    // assert the flags that reach the CLI, not just the pass-through.
-    //
-    // : `threads` is now the RESOLVED limit, not the caller's
-    // VITEST_MAX_THREADS. The run is `--pool=forks`, so a differing thread
-    // budget could never take effect; carrying it forward only left two numbers
-    // in the child env disagreeing about one budget. VITEST_MAX_FORKS wins and
-    // both vars state it.
+    // Preserve legacy gate inputs while binding the selected Vitest 4 pool.
+    // Its config resolver reads VITEST_MAX_WORKERS after CLI options, so an
+    // inherited conflicting value must be overwritten, not just passed through.
     expect(result).toEqual({
       args: [
         "node_modules/vitest/vitest.mjs",
         "run",
         "--cache=false",
         "--pool=forks",
-        `--poolOptions.forks.maxForks=${env.VITEST_MAX_FORKS}`,
-        "--poolOptions.forks.minForks=1",
         `--maxWorkers=${env.VITEST_MAX_FORKS}`,
       ],
       forks: env.VITEST_MAX_FORKS,
       threads: env.VITEST_MAX_FORKS,
+      workers: env.VITEST_MAX_FORKS,
     });
+  });
+
+  it("accepts the Vitest 4 worker limit without legacy inputs", () => {
+    const result = probe(`
+      import { mutationGateVitestInvocation } from ${JSON.stringify(runtime)};
+      const invocation = mutationGateVitestInvocation({ CI: "true", VITEST_MAX_WORKERS: "3" });
+      console.log(JSON.stringify({ args: invocation.args, workers: invocation.env.VITEST_MAX_WORKERS }));
+    `) as { args: string[]; workers: string };
+    expect(result.args).toContain("--maxWorkers=3");
+    expect(result.workers).toBe("3");
   });
 
   // . `spawnSync` without `timeout` blocks forever, so a single wedged

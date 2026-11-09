@@ -5261,6 +5261,51 @@ jobs:
       # It is designed for the operator's environment, not for CI. The operator
       # must run it separately on the archive extract.
 
+  # The patched test toolchain must work at the Node 22 floor and on Node 24,
+  # including native fork/thread pools and the mutation runner's CLI contract.
+  plugin-toolchain-qualification:
+    name: Plugin toolchain (Node ${{ matrix.node }}, ${{ matrix.plugin }})
+    needs: [changes]
+    if: needs.changes.outputs.heavy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+        plugin: [model-selection, cliproxy-insight]
+    defaults:
+      run:
+        working-directory: plugins/${{ matrix.plugin }}
+    env:
+      VITEST_MAX_WORKERS: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: plugins/${{ matrix.plugin }}/package-lock.json
+      - name: Clean install without lifecycle scripts
+        run: |
+          node --version
+          npm --version
+          npm config get ignore-scripts
+          npm ci --include=dev --ignore-scripts
+      - name: Qualify native forks and threads with the mutation worker cap
+        run: node ../../scripts/qualify-vitest-pools.mjs .
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Plugin suite and retained security regressions
+        run: npm test -- --pool=forks --maxWorkers=2
+      - name: Qualify mutation JSON reporting and alias controls
+        if: matrix.plugin == 'model-selection'
+        run: node scripts/admission-simulator-alias-oracle.mjs
+      - name: Build without lifecycle exceptions
+        run: npm run build
+
   # The durable per-upstream-provider usage/cooldown telemetry plugin. It polls a
   # sanitized lane read-only and persists what it sees. Its own job, like
   # dispatch-suite: a failure should read as "the cliproxy-insight suite went
@@ -5404,6 +5449,7 @@ jobs:
       - model-selection-impact
       - model-selection-mutants
       - model-selection-suite
+      - plugin-toolchain-qualification
     if: failure()
     permissions:
       contents: read
@@ -5438,6 +5484,7 @@ jobs:
       - model-selection-impact
       - model-selection-mutants
       - model-selection-suite
+      - plugin-toolchain-qualification
     steps:
       - name: Aggregate gated results
         env:

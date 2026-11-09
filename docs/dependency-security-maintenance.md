@@ -2,6 +2,12 @@
 
 ## Compatible patch group (2026-11-09)
 
+This section records the compatible patch group's original scope and audit,
+merged in PR #110. For the subsequent qualified Vitest/Vite/esbuild migration,
+current held pins, lifecycle inventory and advisory disposition, see
+[Patched plugin test toolchain](plugin-test-toolchain.md). Historical version and
+audit counts below are not a statement of the migrated graph's current state.
+
 Only these lock entries are updated, using npm 11.19.0's native resolver:
 
 | Package | Workspace | Before | After |
