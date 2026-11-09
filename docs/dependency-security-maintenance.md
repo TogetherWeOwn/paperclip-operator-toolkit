@@ -29,10 +29,12 @@ The locked install-hook candidates are esbuild 0.24.2, Vite's nested esbuild
 0.21.5, and optional fsevents 2.3.3. All remain unchanged and their lifecycle
 scripts stay disabled, with **no exceptions**. Neither patched package declares
 an install hook. Their registry metadata records SHA-512 integrity in the locks.
-Named first-party test/typecheck/build commands remain explicit; existing CI uses
-`npm ci --include=dev --ignore-scripts`, then those named commands. Do not enable
-all install scripts to repair a build. Clean install, full suites and builds are
-verified in GitHub Actions, not on the shared development host.
+Named first-party commands remain explicit; existing CI uses
+`npm ci --include=dev --ignore-scripts` in both workspaces. CLIProxy Insight then
+runs typecheck, tests and build; model-selection runs tests and build, but does not
+run `npm run typecheck`. Do not enable all install scripts to repair a build.
+Clean install, full suites and builds are verified in GitHub Actions, not on the
+shared development host.
 
 ### Held pins
 

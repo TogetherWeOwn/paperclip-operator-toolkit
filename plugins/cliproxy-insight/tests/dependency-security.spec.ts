@@ -9,7 +9,7 @@ describe("dependency security maintenance", () => {
   it.each([
     ["source-map-js", "1.2.2"],
     ["fast-uri", "3.1.9"],
-  ])("locks and installs the reviewed %s patch, including nested copies", (name, version) => {
+  ])("locks all %s copies at the reviewed patch and installs the top-level copy", (name, version) => {
     const copies = Object.entries(lock.packages).filter(([path]) => path.endsWith(`/node_modules/${name}`) || path === `node_modules/${name}`);
     expect(copies.length).toBeGreaterThan(0);
     for (const [, entry] of copies) {
