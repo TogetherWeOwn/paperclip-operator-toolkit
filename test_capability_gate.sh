@@ -135,6 +135,49 @@ else
   ok "the capability gate sets its own SAFERALT_NO_ALT_CONSEQUENCE without promising the queue's audit command"
 fi
 
+# The shared allocator can fail independently of capability classification.
+# Exercise this caller too: returning a failure from the library is not enough
+# if submit ignores it and publishes an empty or reused CAP id.
+hdr "0a. Allocation read failures refuse before publication"
+reset
+CAPABILITY_QUEUE="$QUEUE" "$G" submit --requester ENG --capability github.repo.read --action read \
+  --facts "$FACTS" --reasoning "$WHY" >"$TMP/allocate-first.out" 2>&1
+first_rc=$?
+first_id="$(last_id)"
+cp "$QUEUE" "$TMP/allocation-before"
+ALLOC_BIN="$TMP/allocation-bin"; mkdir "$ALLOC_BIN"
+export CAP_ALLOC_REAL_JQ="$(command -v jq)" CAP_ALLOC_FAULT="$TMP/allocation-read-failed"
+cat > "$ALLOC_BIN/jq" <<'JQ'
+#!/usr/bin/env bash
+if [[ $# -eq 3 && "$1" == "-r" && "$2" == 'select(.event=="request.submitted")|.requestId' && "$3" == "$QUEUE" ]]; then
+  : > "$CAP_ALLOC_FAULT"
+  exit 7
+fi
+exec "$CAP_ALLOC_REAL_JQ" "$@"
+JQ
+chmod +x "$ALLOC_BIN/jq"
+BASH_ENV=/dev/null PATH="$ALLOC_BIN:$PATH" CAPABILITY_QUEUE="$QUEUE" "$G" submit \
+  --requester ENG --capability github.repo.read --action read --facts "$FACTS" --reasoning "$WHY" \
+  >"$TMP/allocate-failed.out" 2>&1
+failed_rc=$?
+if [[ "$first_rc" -eq 0 && "$first_id" == CAP-001 && -f "$CAP_ALLOC_FAULT" && "$failed_rc" -eq 2 ]] \
+    && cmp -s "$QUEUE" "$TMP/allocation-before"; then
+  ok "the capability caller refuses an allocation read failure without changing the queue"
+else
+  bad "the capability caller published despite an allocation read failure, or the fixture missed allocation"
+  cat "$TMP/allocate-first.out" "$TMP/allocate-failed.out"
+fi
+if [[ ! -d "${QUEUE}.lock" ]] \
+    && CAPABILITY_QUEUE="$QUEUE" "$G" submit --requester ENG --capability github.repo.read --action read \
+      --facts "$FACTS" --reasoning "$WHY" >"$TMP/allocate-after.out" 2>&1 \
+    && [[ "$(last_id)" == CAP-002 ]]; then
+  ok "the capability caller releases its allocation lock and preserves the CAP id sequence"
+else
+  bad "the capability caller leaked its allocation lock or changed the next CAP id"
+  cat "$TMP/allocate-after.out" 2>/dev/null || true
+fi
+reset
+
 # ---------------------------------------------------------------------------
 hdr "1. The owner's four rules — each fires on its own"
 # Each case is chosen so exactly ONE of the four is the reason, wherever the

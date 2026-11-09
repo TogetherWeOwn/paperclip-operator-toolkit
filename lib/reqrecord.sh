@@ -403,9 +403,16 @@ reqrecord_assert_one_decision() {
 # CALL ONLY WITH THE QUEUE LOCK HELD. This counts rows and returns the next
 # number; the count is stale the moment the lock is released.
 reqrecord_next_id() {
-  local n=1
-  [[ -f "$QUEUE" ]] && n=$(( $(jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" 2>/dev/null | wc -l) + 1 ))
-  printf '%s-%03d' "$REQ_ID_PREFIX" "$n"
+  local n=0
+  if [[ -f "$QUEUE" ]]; then
+    # A failed read is not an empty queue: publishing from that count can reuse
+    # an existing id even while the caller holds both locks.
+    n="$(set -o pipefail; jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" | wc -l)" || {
+      echo "REFUSED: could not count request submissions in $QUEUE" >&2
+      return 1
+    }
+  fi
+  printf '%s-%03d' "$REQ_ID_PREFIX" "$((n + 1))"
 }
 
 # `column` is util-linux and is NOT present everywhere this runs — a container

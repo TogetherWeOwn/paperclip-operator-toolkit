@@ -670,7 +670,10 @@ cmd_submit() {
 
   local rid exp; exp="$(plus_days "$REQUEST_TTL_DAYS")"
   queue_lock
-  rid="$(reqrecord_next_id)"
+  if ! rid="$(reqrecord_next_id)"; then
+    queue_unlock
+    die "could not allocate a request id."
+  fi
   append_queue "$(jq -cn --arg id "$rid" --arg st "$status" --arg r "$requester" --arg rid2 "$rq_id" \
     --arg t "$rq_tpl" --arg cap "$cap" --arg a "$action" --arg ti "$title" \
     --arg fa "$facts" --arg re "$reasoning" --arg m "$mode" --arg d "$decider" --arg cu "$cust" \
