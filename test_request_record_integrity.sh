@@ -106,9 +106,23 @@ hdr "1. A request id names exactly one request"
 # inside DIR's request ceiling, so nothing here is a ceiling violation; the
 # violation is that the decision does not bind to what was decided.
 reset
-"$Q" submit --requester DIR --template E0_SPECIALIST --title "IRQ Junior web engineer" >"$TMP/submit-one.out" 2>&1 &
+# Opt-in Actions diagnostics cover only these two synthetic submissions. Never
+# trace an inherited environment: queue startup can otherwise expand credentials.
+concurrent_submit() {
+  local label="$1"; shift
+  if [[ -n "${REQUEST_RECORD_DIAGNOSTICS_DIR:-}" ]]; then
+    env -i PATH="$PATH" HOME="$TMP" COMPANY_ID="$COMPANY_ID" \
+      QUEUE="$QUEUE" GRANT_LOG="$GRANT_LOG" DISABLED_TEMPLATES="$DISABLED_TEMPLATES" \
+      ORG_SNAPSHOT="$ORG_SNAPSHOT" PROV="$PROV" CREATE_ARGV="$CREATE_ARGV" \
+      BASH_XTRACEFD=9 PS4='+ ${EPOCHREALTIME} ${BASHPID} ${BASH_SOURCE}:${LINENO}: ' \
+      bash -x "$Q" "$@" 9>"$TMP/$label.trace"
+  else
+    "$Q" "$@"
+  fi
+}
+concurrent_submit submit-one submit --requester DIR --template E0_SPECIALIST --title "IRQ Junior web engineer" >"$TMP/submit-one.out" 2>&1 &
 first_pid=$!
-"$Q" submit --requester DIR --template D1_MANAGER --title "IRQ Engineering manager" >"$TMP/submit-two.out" 2>&1 &
+concurrent_submit submit-two submit --requester DIR --template D1_MANAGER --title "IRQ Engineering manager" >"$TMP/submit-two.out" 2>&1 &
 second_pid=$!
 wait "$first_pid"; first_rc=$?
 wait "$second_pid"; second_rc=$?
@@ -120,6 +134,15 @@ else
   bad "concurrent allocation failed (exits $first_rc/$second_rc, $total submitted, $uniq_n distinct)"
   cat "$TMP/submit-one.out" "$TMP/submit-two.out"
   jq -r 'select(.event=="request.submitted")|"        \(.requestId)  \(.template)  \(.title)"' "$QUEUE"
+  if [[ -n "${REQUEST_RECORD_DIAGNOSTICS_DIR:-}" ]]; then
+    mkdir -p "$REQUEST_RECORD_DIAGNOSTICS_DIR"
+    cp "$TMP/submit-one.trace" "$TMP/submit-two.trace" \
+      "$TMP/submit-one.out" "$TMP/submit-two.out" "$REQUEST_RECORD_DIAGNOSTICS_DIR/"
+    [[ ! -f "$QUEUE" ]] || cp "$QUEUE" "$REQUEST_RECORD_DIAGNOSTICS_DIR/queue.snapshot"
+    printf 'first_rc=%s\nsecond_rc=%s\nsubmitted=%s\ndistinct=%s\n' \
+      "$first_rc" "$second_rc" "$total" "$uniq_n" > "$REQUEST_RECORD_DIAGNOSTICS_DIR/result.txt"
+    note "isolated concurrency diagnostics retained in $REQUEST_RECORD_DIAGNOSTICS_DIR"
+  fi
 fi
 
 # The locks serialize a successful count, but a failed count must not become

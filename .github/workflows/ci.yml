@@ -1081,7 +1081,18 @@ jobs:
       # bolted onto the one above. Same two offline seams (ORG_SNAPSHOT and a
       # stub PROV), so it needs no database and no credential either.
       - name: request-record integrity suite
+        env:
+          REQUEST_RECORD_DIAGNOSTICS_DIR: ${{ runner.temp }}/request-record-diagnostics
         run: ./test_request_record_integrity.sh
+
+      - name: Retain failed concurrent-submission diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: request-record-diagnostics-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/request-record-diagnostics/*
+          if-no-files-found: ignore
+          retention-days: 7
 
       # TOG-254. A third question again: the first two ask who may decide and
       # whether the record survives, this one asks whether the REQUESTER ever

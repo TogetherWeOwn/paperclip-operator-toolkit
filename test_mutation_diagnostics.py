@@ -129,5 +129,65 @@ class MutationDiagnostics(unittest.TestCase):
                 self.assert_diagnostic(result, saved, "sibling", "SIBLING", code)
 
 
+class ConcurrentSubmissionDiagnostics(unittest.TestCase):
+    def test_failed_concurrency_retains_isolated_traces(self):
+        source = (ROOT / SIBLING).read_text()
+        start = source.index('reset\n# Opt-in Actions diagnostics')
+        end = source.index('\n# The locks serialize', start)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            queue = root / "queue.sh"
+            # Deterministically reproduce the observed shape, not its unknown
+            # cause: two successful children but only one retained REQ-001.
+            queue.write_text(textwrap.dedent('''\
+                #!/usr/bin/env bash
+                [[ -z "${TRACE_SECRET_CANARY:-}" && -z "${BASH_ENV:-}" ]] || exit 90
+                [[ -f "$ORG_SNAPSHOT" && -x "$PROV" ]] || exit 91
+                printf '%s\\n' '{"event":"request.submitted","requestId":"REQ-001"}' > "$QUEUE"
+                printf 'fixture-child-stdout\\n'
+                printf 'fixture-child-stderr\\n' >&2
+            '''))
+            queue.chmod(0o700)
+            (root / "org.tsv").touch()
+            (root / "startup.sh").write_text("exit 92\n")
+            script = textwrap.dedent('''\
+                TMP="$CASE_ROOT"
+                Q="$TMP/queue.sh"
+                QUEUE="$TMP/queue.jsonl"
+                GRANT_LOG="$TMP/grants.jsonl"
+                DISABLED_TEMPLATES="$TMP/disabled"
+                ORG_SNAPSHOT="$TMP/org.tsv"
+                PROV="$Q"
+                CREATE_ARGV="$TMP/create.argv"
+                COMPANY_ID=offline-fixture-not-a-real-company
+                FAIL=0
+                reset() { :; }
+                ok() { :; }
+                bad() { FAIL=$((FAIL+1)); }
+                note() { :; }
+                export BASH_ENV="$TMP/startup.sh"
+            ''') + source[start:end] + '\nexit "$FAIL"\n'
+            saved_dir = root / "diagnostics"
+            result = subprocess.run(
+                ["bash", "-u", "-o", "pipefail", "-c", script],
+                env={**os.environ, "CASE_ROOT": temp, "BASH_ENV": "/dev/null",
+                     "REQUEST_RECORD_DIAGNOSTICS_DIR": str(saved_dir),
+                     "TRACE_SECRET_CANARY": "must-not-reach-child-trace"},
+                capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            saved = {p.name: p.read_text() for p in saved_dir.iterdir()}
+            self.assertEqual(set(saved), {"submit-one.trace", "submit-two.trace",
+                                          "submit-one.out", "submit-two.out",
+                                          "queue.snapshot", "result.txt"})
+            self.assertEqual(saved["result.txt"],
+                             "first_rc=0\nsecond_rc=0\nsubmitted=1\ndistinct=1\n")
+            for label in ("submit-one", "submit-two"):
+                self.assertTrue(saved[f"{label}.trace"])
+                self.assertIn("fixture-child-stdout", saved[f"{label}.out"])
+                self.assertIn("fixture-child-stderr", saved[f"{label}.out"])
+            self.assertNotIn("must-not-reach-child-trace", "".join(saved.values()))
+
+
 if __name__ == "__main__":
     unittest.main()
