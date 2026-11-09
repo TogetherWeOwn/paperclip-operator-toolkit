@@ -44,6 +44,12 @@ class PluginWiring(unittest.TestCase):
             self.assertIn(required, qualification)
         self.assertNotIn("continue-on-error", qualification)
 
+    def test_toolchain_failure_reaches_failure_log_drain(self):
+        block = job(self.text, "failure-log-drain")
+        self.assertIn("      - plugin-toolchain-qualification\n", block)
+        self.assertIn("if: failure()", block)
+        self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", block)
+
     def test_scans_are_always_on(self):
         # Neither scan may sit behind the change gate: docs-only changes and
         # draft PRs must still be scanned. Not a prefix match: any `needs:` or

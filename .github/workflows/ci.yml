@@ -5449,6 +5449,7 @@ jobs:
       - model-selection-impact
       - model-selection-mutants
       - model-selection-suite
+      - plugin-toolchain-qualification
     if: failure()
     permissions:
       contents: read
