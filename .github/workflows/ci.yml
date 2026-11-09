@@ -5250,6 +5250,20 @@ jobs:
       - name: Verify the plugin builds
         run: npm run build
 
+      # Baseline held-pin evidence only. A real worker/SDK wire fixture is not
+      # stock scheduler, capability-dispatch or authorization qualification.
+      - name: Qualify held SDK consumer and real worker wire on Node 24
+        run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/wire.mjs .
+
+      # Exercise the advertised minimum with the SAME built worker/install, not
+      # the host's SDK/Zod. This does not qualify a Node24-only SDK migration.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+
+      - name: Qualify held SDK consumer and real worker wire on Node 22
+        run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/wire.mjs .
+
       # Every manifest-declared path must be in the distributable. A checksum
       # list that agrees with an incomplete archive cannot catch a missing
       # directory, so this compares the evaluated manifest against the actual
@@ -5312,6 +5326,18 @@ jobs:
       # This proves the bundle still builds.
       - name: Verify the plugin builds
         run: npm run build
+
+      - name: Qualify held SDK consumer and real worker wire on Node 24
+        run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/wire.mjs .
+
+      # Exercise the advertised minimum with the SAME built worker/install, not
+      # the host's SDK/Zod. This does not qualify a Node24-only SDK migration.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+
+      - name: Qualify held SDK consumer and real worker wire on Node 22
+        run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/wire.mjs .
 
   # The plugin tree is published; it carries no internal tracker IDs, hostnames,
   # private addresses or host-local paths. The self-test proves each pattern can
