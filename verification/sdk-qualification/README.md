@@ -200,7 +200,7 @@ candidate support claim. Reports retain `migrationQualified: false` and
 `stockHostQualified: false`. It remains insufficient for stock authorization,
 config-route/scheduler qualification, source migration or operational adoption.
 
-### Candidate production-source typecheck and rebuild — prepared, not passed
+### Candidate production-source typecheck and rebuild — pinned passing subset
 
 `source-candidate.mjs` adds a separate experiment after the existing candidate
 runtime controls. It copies regular files from `src`, the package manifest,
@@ -225,9 +225,18 @@ is **not** a candidate engine-compatibility claim. The newly rebuilt artifacts a
 hashed and run through the same consumer/schema/counter/real-wire controls against
 the candidate. Input bytes must stay unchanged. A JSON report is uploaded even on
 a failed typecheck/build/wire step, retaining incomplete flags and diagnostics;
-nonzero remains a failed job, never a compatibility pass. No such source result
-has passed Actions yet. Production source engines/pins, release selection and
-stock/migration qualification remain unchanged.
+nonzero remains a failed job, never a compatibility pass.
+
+At exact head `2766ecd0ee1fade2a2003b77dff326a186db2853`, the
+[Insight job](https://github.com/TogetherWeOwn/paperclip-operator-toolkit/actions/runs/42613038100/job/129146466786)
+and [model-selection job](https://github.com/TogetherWeOwn/paperclip-operator-toolkit/actions/runs/42613038100/job/129153065383)
+passed. Completed logs contain `sourceTypechecked`, `brokenSourceRejected`,
+`rebuilt` and `wireCompleted` all true, followed by source-report uploads. These
+jobs also passed the held/candidate shared-schema and runtime subsets. Full CI
+was still incomplete at inspection. This qualifies only that head's production
+source experiment, not tests/test-runner compilation, stock execution, a Node22
+candidate runtime or any later head. Production source engines/pins, release
+selection and stock/migration qualification remain unchanged.
 
 ## Technical target disposition
 
@@ -245,6 +254,57 @@ associated source `d69631b01b9c658f80bf8bed389863dce82643e1`, expected release
 selection is preparation only, not permission to install the image early, a passed
 stock lifecycle or any release verdict. The 1106 age/install and Security holds
 still apply. No image is pulled or run by these candidate fixtures.
+
+## Prepared stock driver — NOT enabled or executed
+
+`stock-driver.mjs` prepares actual supported local-path install/disable/enable,
+worker-health, host manifest-load refusal, config-save/test Ajv controls and
+Insight's scoped API on the selected stock image. It accepts no endpoint argument,
+requires the exact source/release/image evidence, private local-trusted mode and a
+network-none namespace, and records the candidate workers' native ESM edges.
+Those misuse guards are not approval. The image inspection record must come from
+the future authorized Actions lifecycle; a driver receipt cannot establish its
+own image authenticity, native-age acceptance, container mounts or approval.
+
+The driver uses only synthetic companies, with polling **disabled**, no secrets
+and empty lane lists. Config invalid-object/schema/missing-company controls must
+leave persisted config unchanged. An API-version999 manifest in disposable storage
+must fail the real loader with an API-version diagnostic and remain unregistered.
+A same-company empty-usage control brackets missing-company and unconfigured-company
+API refusals. This local-trusted board fixture is not a scoped-agent authorization
+test or proof of zero unauthorized host-service calls.
+
+The prepared scheduler observer waits at most six minutes for a new successful
+`trigger: schedule` run after the job's published `nextRunAt`. It preserves the
+five-minute production cron and the stock clock/DB, never calls the manual trigger
+API or invokes `tick()` itself, and rejects manual, historical, foreign and
+incomplete receipts. A successful run here would establish scheduled **no-op**
+dispatch only; it cannot establish `poll_ok`, telemetry persistence, cancellation,
+capability denial or complete containment. All those report flags stay false.
+Container/volume removal on normal/failure paths and hosted-VM disposal remain
+mandatory in the future lifecycle; the driver must never run against a managed
+instance or serve as a standalone deployment instruction.
+
+No workflow invokes the driver, pulls its image or installs stock packages.
+`stock-source-controls` runs only its syntax check and first-party receipt-unit
+controls in Actions, with no dependency install. These source checks are prepared,
+not passing runtime evidence. The existing age/install/Security holds must clear
+before a separately reviewed lifecycle may execute anything stock-related.
+
+### Exact remaining fixture prerequisite
+
+The read-only stock1106 source rejects loopback/private HTTP destinations in
+`plugin-host-services.js:94-146` and pins DNS before the HTTP request;
+`http.fetch` uses that path at `:1437-1451`. Insight's `onValidateConfig` also
+refuses polling-enabled loopback or HTTP lanes (`worker.ts:889-915`). A loopback
+HTTP adapter in a network-none namespace therefore cannot be the required
+same-company telemetry positive. No supported HTTP injection seam was found in
+that inspected host service. This is scoped source evidence, not proof that no
+safe supported fixture topology exists. Do not disable SSRF, TLS, company gates,
+change installed core, repoint to a real lane or treat another plugin's fixture
+as success. A supported synthetic telemetry/service observation topology and a
+scoped actor/capability fixture preserving these protections remain concrete
+prerequisites. Source-only lifecycle preparation continues independently.
 
 ## Gates still open
 
