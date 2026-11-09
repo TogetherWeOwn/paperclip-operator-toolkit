@@ -306,6 +306,64 @@ as success. A supported synthetic telemetry/service observation topology and a
 scoped actor/capability fixture preserving these protections remain concrete
 prerequisites. Source-only lifecycle preparation continues independently.
 
+### Supported service contract — NOT QUALIFIED
+
+The bounded technical contract confirms that the full positive/negative matrix is
+not safely reachable with the currently evidenced network-none, loopback-only,
+local-trusted fixture. This is not universal impossibility and not approval to
+widen that fixture. `partialStockReport().unqualifiedControls` records each absent
+observation as **not-exercised**, never a measured zero. Completing lifecycle,
+config and scheduled no-op checks leaves every qualification flag false.
+
+| Missing control | Required positive or denial evidence |
+| --- | --- |
+| Insight telemetry | Its unchanged five-minute scheduled poll, real company-A secret resolution, two bounded successful aggregate HTTPS reads, nonempty A snapshots and `poll_ok`, with no B activity. Use the real config save/test path; bootstrap config is not company binding. |
+| Model-selection telemetry | Its own unchanged two-minute scheduled `pollLaneCapacity`, company-A lane-ledger observation and allowed read of that data. Keep advise mode, inference, mutations and dispatch off. Insight's result does not qualify this worker. |
+| HTTP/secret capability denial | Separately labelled native factory/manager cases omit only the relevant capability and require native denial before actual HTTP-service or secret-resolver entry. Count earlier permitted config/secret reads and error metrics honestly. No installed permission-revocation interface has been established. |
+| Invocation scope denial | A real-plugin call must reach the native host scope gate with mismatched/absent scope and produce zero target-service delegation. Plugin early refusal is not host scope denial; if no real-plugin trigger reaches it, this row stays inaccessible. |
+| Scoped HTTP actor | The same read/tool route succeeds for restricted actor A against A, but rejects A against B and an unauthenticated request before worker dispatch. Local-trusted implicit board access and body/query actor fields cannot satisfy authentication. |
+
+Three prerequisite receipts remain absent:
+
+1. **Supported observation and trigger assembly.** Shipped constructor declarations
+   for `createPluginWorkerManager`, `createPluginJobScheduler` and the SDK handler
+   factory are source evidence, not proof that the selected image exports accessible
+   modules. Server package subpaths are not public exports and the image uses a
+   bundle. Verify accessibility and supported assembly before importing. An eventual
+   observation adapter may transparently count calls around actual `buildHostServices`
+   delegates, preserving arguments, context, values and errors. Never replace HTTP,
+   secrets, config or state results, forge invocations, replace the scheduler/DB,
+   or label constructor tests installed-app HTTP authorization.
+2. **Authorized disposable resources.** No existing authorized routable synthetic
+   HTTPS origin, company-bound secret material or restricted actor material has been
+   demonstrated. Stock DNS pinning, address checks and certificate validation must
+   remain unchanged. Any later topology needs exact path/method/byte budgets, narrow
+   egress/DNS, bounded readiness/use, expiry and teardown, without idle recurring cost.
+   Mapping a public-looking address to a private service, a forwarding proxy, transport
+   replacement or a real lane key is not a workaround. Network widening, new credentials
+   and paid resources are not authorized here.
+3. **Exact-artifact execution release.** Existing installation/Security holds must
+   explicitly clear. The 1106 age threshold is only a necessary native-policy condition,
+   not sufficient authority. The driver remains disabled and no widened-network
+   lifecycle is added. Operational adoption is outside this source-only experiment.
+
+Any later service-effect ledger must identify plugin, company, invocation/job/run
+and observation window; distinguish attempted gated calls from entries **after**
+the gate into real HTTP, secret, config/state, activity/metrics and mutation services.
+Include an allowed positive in the same observation setup to prove counters are live.
+Missing observers, stale/skipped windows and unavailable triggers are unknown, not
+zero. Permitted refusal metrics and scheduler bookkeeping are not unauthorized
+telemetry/data effects. Neither an empty state snapshot nor an HTTP error establishes
+this ledger. Timeout/signal behavior and unsupported opt-in dispatch stay separate.
+
+REA angle: inspect the shipped factory/manager/loader/scheduler assembly to locate
+real gates and supported seams, rather than constructing fake authority. If these
+receipts cannot safely be obtained, retain NOT QUALIFIED and held pins, record the
+exact inaccessible row, and choose a bounded compatible containment/migration
+prerequisite through the existing technical and support-scope decision routes.
+This is not vulnerability acceptance, permission for an installed core patch or a
+passive wait for a vendor.
+
 ## Gates still open
 
 - Minimal v4-native SDK/shared 2026.831.0 with Zod 4.6.7 is qualification-only,

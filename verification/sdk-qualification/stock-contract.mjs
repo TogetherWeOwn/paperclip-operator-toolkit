@@ -35,10 +35,17 @@ export function partialStockReport() {
     lifecycleCompleted: false, configRoutesCompleted: false, scheduledDispatchObserved: false,
     telemetryPositive: false, runtimeCapabilityDenial: false, unauthorizedServiceEffectsMeasured: false,
     stockHostQualified: false, migrationQualified: false,
+    unqualifiedControls: {
+      insightTelemetry: { status: 'not-exercised', reason: 'Requires an authorized routable HTTPS origin and company-bound disposable secret material; network-none cannot supply the stock HTTP positive.' },
+      modelSelectionTelemetry: { status: 'not-exercised', reason: 'Requires its own real scheduled lane observation; Insight success or an empty company set cannot qualify it.' },
+      capabilityDenial: { status: 'not-exercised', reason: 'Requires real service-entry counters after native HTTP and secret capability gates; constructor accessibility on the selected image is unverified.' },
+      invocationScopeDenial: { status: 'not-exercised', reason: 'Requires a real-plugin call reaching the host scope gate; plugin early refusal cannot establish host denial.' },
+      scopedHttpActor: { status: 'not-exercised', reason: 'Requires an already-authorized restricted actor and authenticated mode without implicit board access; a company GUID is not authentication.' },
+    },
     prerequisites: [
-      'Installation/age and Security holds must clear before any image pull or driver execution.',
-      'A supported synthetic telemetry/service observation path preserving stock SSRF, HTTPS and company gates is still required.',
-      'A scoped actor/capability fixture must measure actual stock denial and zero unauthorized service effects; local-trusted board access is not that proof.',
+      'Exact-artifact installation/age and Security holds must explicitly clear before any image pull or driver execution; elapsed age alone is not approval.',
+      'Verify selected-image constructor accessibility and supported assembly with transparent counters around actual services; do not replace service results or call it installed HTTP authorization.',
+      'Establish authorized synthetic HTTPS, company-bound secret and scoped-actor material, bounded egress and teardown receipts before widening network-none; no credential creation or security relaxation is authorized.',
     ], checks: [],
   };
 }

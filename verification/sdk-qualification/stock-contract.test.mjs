@@ -49,6 +49,14 @@ test('even completed lifecycle/config/schedule subsets cannot report full qualif
   for (const key of ['telemetryPositive', 'runtimeCapabilityDenial', 'unauthorizedServiceEffectsMeasured',
     'stockHostQualified', 'migrationQualified']) assert.equal(report[key], false);
   assert.equal(report.prerequisites.length, 3);
+  assert.deepEqual(Object.keys(report.unqualifiedControls).sort(), [
+    'capabilityDenial', 'insightTelemetry', 'invocationScopeDenial', 'modelSelectionTelemetry', 'scopedHttpActor',
+  ]);
+  for (const control of Object.values(report.unqualifiedControls)) {
+    assert.equal(control.status, 'not-exercised', 'Unavailable observation is not a measured zero');
+    assert.equal(typeof control.reason, 'string');
+    assert(control.reason.length > 0);
+  }
 });
 test('Actions checks source but never invokes the held stock driver or pulls its image', async () => {
   const workflow = await readFile(new URL('../../.github/workflows/sdk-candidate.yml', import.meta.url), 'utf8');
