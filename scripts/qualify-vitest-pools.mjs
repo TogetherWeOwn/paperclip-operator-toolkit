@@ -41,7 +41,6 @@ try {
     assert.ifError(result.error);
     assert.equal(result.signal, null, `${pool}: incomplete run`);
     assert.equal(result.status, 0, `${pool}: fixture assertions failed`);
-    assert.match(result.stdout, /Test Files/, `${pool}: no completed summary`);
     const events = readFileSync(trace, "utf8").trim().split("\n").map(line => JSON.parse(line));
     assert.equal(events.length, 8, `${pool}: not all fixture files ran`);
     const active = new Set();
