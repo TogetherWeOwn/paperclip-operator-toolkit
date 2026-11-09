@@ -1083,10 +1083,17 @@ jobs:
       - name: request-record integrity suite
         env:
           REQUEST_RECORD_DIAGNOSTICS_DIR: ${{ runner.temp }}/request-record-diagnostics
-        run: ./test_request_record_integrity.sh
+          REQUEST_RECORD_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          mkdir -p "$REQUEST_RECORD_DIAGNOSTICS_DIR"
+          printf 'head=%s\ncheckout=%s\nrun=%s\nattempt=%s\njob=%s\n' \
+            "$REQUEST_RECORD_HEAD_SHA" "$(git rev-parse HEAD)" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB" > "$REQUEST_RECORD_DIAGNOSTICS_DIR/context.txt"
+          ./test_request_record_integrity.sh
 
-      - name: Retain failed concurrent-submission diagnostics
-        if: failure()
+      - name: Retain concurrent-submission experiment evidence
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: request-record-diagnostics-${{ github.event.pull_request.head.sha || github.sha }}

@@ -108,14 +108,45 @@ hdr "1. A request id names exactly one request"
 reset
 # Opt-in Actions diagnostics cover only these two synthetic submissions. Never
 # trace an inherited environment: queue startup can otherwise expand credentials.
+diagnostic_tracer=()
+if [[ -n "${REQUEST_RECORD_DIAGNOSTICS_DIR:-}" ]]; then
+  # Probe only a separate credential-free no-op before launching either child.
+  # An installed tracer can lack ptrace permission; never retry a submission.
+  tracer_rc=127
+  if command -v strace >/dev/null; then
+    diagnostic_tracer=(strace -f -ttt -T -s 256 -e trace=execve,mkdir,mkdirat,unlink,unlinkat,rmdir,exit_group,wait4,chdir)
+    env -i PATH="$PATH" HOME="$TMP" timeout --kill-after=1 5 \
+      "${diagnostic_tracer[@]}" -o "$TMP/tracer-probe.syscalls" /usr/bin/true \
+      >"$TMP/tracer-probe.out" 2>&1; tracer_rc=$?
+  fi
+  printf 'probe_rc=%s\n' "$tracer_rc" >> "$TMP/tracer-probe.out"
+  [[ "$tracer_rc" -eq 0 ]] || diagnostic_tracer=()
+fi
+diagnostic_submit() {
+  local label="$1" script="$2"; shift 2
+  local -a observer=()
+  if [[ "${#diagnostic_tracer[@]}" -gt 0 ]]; then
+    observer=("${diagnostic_tracer[@]}" -o "$TMP/$label.syscalls")
+  else
+    printf 'syscall_tracer=unavailable\nprobe_rc=%s\n' "$tracer_rc" > "$TMP/$label.syscalls"
+  fi
+  if [[ "$label" == lock-controls ]]; then
+    observer=(timeout --kill-after=1 10 "${observer[@]}")
+  fi
+  env -i PATH="$PATH" HOME="$TMP" COMPANY_ID="$COMPANY_ID" \
+    QUEUE="$QUEUE" GRANT_LOG="$GRANT_LOG" DISABLED_TEMPLATES="$DISABLED_TEMPLATES" \
+    ORG_SNAPSHOT="$ORG_SNAPSHOT" PROV="$PROV" CREATE_ARGV="$CREATE_ARGV" \
+    REQUEST_RECORD_DIAGNOSTIC_SCRIPT="$script" \
+    REQUEST_RECORD_OBSERVER_PYTHON="$(command -v python3)" \
+    REQUEST_RECORD_OBSERVER_METADATA="$HERE/test/request_record_provenance.py" \
+    BASH_ENV="$HERE/test/request_record_provenance.sh" \
+    BASH_XTRACEFD=9 PS4='+ ${EPOCHREALTIME} ${BASHPID} ${BASH_SOURCE}:${LINENO}: ' \
+    "${observer[@]}" bash -x "$script" "$@" 8>"$TMP/$label.provenance" 9>"$TMP/$label.trace"
+}
 concurrent_submit() {
   local label="$1"; shift
   if [[ -n "${REQUEST_RECORD_DIAGNOSTICS_DIR:-}" ]]; then
-    env -i PATH="$PATH" HOME="$TMP" COMPANY_ID="$COMPANY_ID" \
-      QUEUE="$QUEUE" GRANT_LOG="$GRANT_LOG" DISABLED_TEMPLATES="$DISABLED_TEMPLATES" \
-      ORG_SNAPSHOT="$ORG_SNAPSHOT" PROV="$PROV" CREATE_ARGV="$CREATE_ARGV" \
-      BASH_XTRACEFD=9 PS4='+ ${EPOCHREALTIME} ${BASHPID} ${BASH_SOURCE}:${LINENO}: ' \
-      bash -x "$Q" "$@" 9>"$TMP/$label.trace"
+    diagnostic_submit "$label" "$Q" "$@"
   else
     "$Q" "$@"
   fi
@@ -134,15 +165,27 @@ else
   bad "concurrent allocation failed (exits $first_rc/$second_rc, $total submitted, $uniq_n distinct)"
   cat "$TMP/submit-one.out" "$TMP/submit-two.out"
   jq -r 'select(.event=="request.submitted")|"        \(.requestId)  \(.template)  \(.title)"' "$QUEUE"
-  if [[ -n "${REQUEST_RECORD_DIAGNOSTICS_DIR:-}" ]]; then
-    mkdir -p "$REQUEST_RECORD_DIAGNOSTICS_DIR"
-    cp "$TMP/submit-one.trace" "$TMP/submit-two.trace" \
-      "$TMP/submit-one.out" "$TMP/submit-two.out" "$REQUEST_RECORD_DIAGNOSTICS_DIR/"
-    [[ ! -f "$QUEUE" ]] || cp "$QUEUE" "$REQUEST_RECORD_DIAGNOSTICS_DIR/queue.snapshot"
-    printf 'first_rc=%s\nsecond_rc=%s\nsubmitted=%s\ndistinct=%s\n' \
-      "$first_rc" "$second_rc" "$total" "$uniq_n" > "$REQUEST_RECORD_DIAGNOSTICS_DIR/result.txt"
-    note "isolated concurrency diagnostics retained in $REQUEST_RECORD_DIAGNOSTICS_DIR"
-  fi
+fi
+if [[ -n "${REQUEST_RECORD_DIAGNOSTICS_DIR:-}" ]]; then
+  # Keep evidence even on non-recurrence. Controls never touch the original queue
+  # or serialize its submissions; they start only after its oracle is evaluated.
+  control_root="$(mktemp -d "$TMP/lock-controls.XXXXXX")"
+  diagnostic_submit lock-controls "$HERE/test/request_record_provenance.sh" "$control_root" \
+    >"$TMP/lock-controls.out" 2>&1; controls_rc=$?
+  [[ "$controls_rc" -eq 0 ]] || bad "isolated command/filesystem control failed (exit $controls_rc)"
+  mkdir -p "$REQUEST_RECORD_DIAGNOSTICS_DIR"
+  cp "$TMP/submit-one."{trace,provenance,syscalls,out} \
+    "$TMP/submit-two."{trace,provenance,syscalls,out} \
+    "$TMP/lock-controls."{trace,provenance,syscalls,out} "$TMP/tracer-probe.out" "$REQUEST_RECORD_DIAGNOSTICS_DIR/"
+  [[ ! -f "$TMP/tracer-probe.syscalls" ]] || cp "$TMP/tracer-probe.syscalls" "$REQUEST_RECORD_DIAGNOSTICS_DIR/"
+  for contender in one two; do
+    [[ ! -f "$control_root/$contender.out" ]] || \
+      cp "$control_root/$contender.out" "$REQUEST_RECORD_DIAGNOSTICS_DIR/control-$contender.out"
+  done
+  [[ ! -f "$QUEUE" ]] || cp "$QUEUE" "$REQUEST_RECORD_DIAGNOSTICS_DIR/queue.snapshot"
+  printf 'first_rc=%s\nsecond_rc=%s\nsubmitted=%s\ndistinct=%s\ncontrols_rc=%s\n' \
+    "$first_rc" "$second_rc" "$total" "$uniq_n" "$controls_rc" > "$REQUEST_RECORD_DIAGNOSTICS_DIR/result.txt"
+  note "isolated concurrency diagnostics retained in $REQUEST_RECORD_DIAGNOSTICS_DIR"
 fi
 
 # The locks serialize a successful count, but a failed count must not become

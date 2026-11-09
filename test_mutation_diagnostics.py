@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the actual workflow functions with deterministic offline results."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -130,7 +131,7 @@ class MutationDiagnostics(unittest.TestCase):
 
 
 class ConcurrentSubmissionDiagnostics(unittest.TestCase):
-    def test_failed_concurrency_retains_isolated_traces(self):
+    def run_concurrency(self, *, distinct=False, permissive_mkdir=False, rejected_tracer=False):
         source = (ROOT / SIBLING).read_text()
         start = source.index('reset\n# Opt-in Actions diagnostics')
         end = source.index('\n# The locks serialize', start)
@@ -141,13 +142,36 @@ class ConcurrentSubmissionDiagnostics(unittest.TestCase):
             # cause: two successful children but only one retained REQ-001.
             queue.write_text(textwrap.dedent('''\
                 #!/usr/bin/env bash
-                [[ -z "${TRACE_SECRET_CANARY:-}" && -z "${BASH_ENV:-}" ]] || exit 90
+                [[ -z "${TRACE_SECRET_CANARY:-}" ]] || exit 90
+                [[ "$BASH_ENV" == */test/request_record_provenance.sh ]] || exit 92
                 [[ -f "$ORG_SNAPSHOT" && -x "$PROV" ]] || exit 91
+                QUEUE_LOCK="${QUEUE}.lock"
+                REQRECORD_STATUS_LOCK="${QUEUE}.notify-status.lock"
+                mkdir "$QUEUE_LOCK"; first=$?
+                mkdir "$QUEUE_LOCK"; second=$?
+                mkdir "$REQRECORD_STATUS_LOCK"
+                if mkdir "$REQRECORD_STATUS_LOCK"; then :; fi
+                printf 'fixture-status:%s/%s\\n' "$first" "$second"
                 printf '%s\\n' '{"event":"request.submitted","requestId":"REQ-001"}' > "$QUEUE"
                 printf 'fixture-child-stdout\\n'
                 printf 'fixture-child-stderr\\n' >&2
             '''))
+            if distinct:
+                queue.write_text(queue.read_text().replace(
+                    "printf '%s\\n' '{\"event\":\"request.submitted\",\"requestId\":\"REQ-001\"}' > \"$QUEUE\"",
+                    "printf '{\"event\":\"request.submitted\",\"requestId\":\"REQ-%s\"}\\n' \"$BASHPID\" >> \"$QUEUE\"",
+                ))
             queue.chmod(0o700)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            if permissive_mkdir:
+                shim = fake_bin / "mkdir"
+                shim.write_text('#!/bin/bash\nexec /usr/bin/mkdir -p "$@"\n')
+                shim.chmod(0o700)
+            if rejected_tracer:
+                tracer = fake_bin / "strace"
+                tracer.write_text('#!/bin/bash\nprintf "fixture-probe-denied\\n" >&2\nexit 73\n')
+                tracer.chmod(0o700)
             (root / "org.tsv").touch()
             (root / "startup.sh").write_text("exit 92\n")
             script = textwrap.dedent('''\
@@ -170,23 +194,77 @@ class ConcurrentSubmissionDiagnostics(unittest.TestCase):
             saved_dir = root / "diagnostics"
             result = subprocess.run(
                 ["bash", "-u", "-o", "pipefail", "-c", script],
-                env={**os.environ, "CASE_ROOT": temp, "BASH_ENV": "/dev/null",
-                     "REQUEST_RECORD_DIAGNOSTICS_DIR": str(saved_dir),
+                env={**os.environ, "CASE_ROOT": temp, "HERE": str(ROOT),
+                     "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+                     "BASH_ENV": "/dev/null", "REQUEST_RECORD_DIAGNOSTICS_DIR": str(saved_dir),
                      "TRACE_SECRET_CANARY": "must-not-reach-child-trace"},
                 capture_output=True, text=True, timeout=15,
             )
-            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             saved = {p.name: p.read_text() for p in saved_dir.iterdir()}
-            self.assertEqual(set(saved), {"submit-one.trace", "submit-two.trace",
-                                          "submit-one.out", "submit-two.out",
-                                          "queue.snapshot", "result.txt"})
-            self.assertEqual(saved["result.txt"],
-                             "first_rc=0\nsecond_rc=0\nsubmitted=1\ndistinct=1\n")
-            for label in ("submit-one", "submit-two"):
-                self.assertTrue(saved[f"{label}.trace"])
-                self.assertIn("fixture-child-stdout", saved[f"{label}.out"])
-                self.assertIn("fixture-child-stderr", saved[f"{label}.out"])
-            self.assertNotIn("must-not-reach-child-trace", "".join(saved.values()))
+        return result, saved
+
+    def test_failed_concurrency_retains_isolated_traces(self):
+        result, saved = self.run_concurrency()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        expected = {f"{label}.{suffix}" for label in ("submit-one", "submit-two", "lock-controls")
+                    for suffix in ("trace", "provenance", "syscalls", "out")}
+        expected |= {"queue.snapshot", "result.txt", "tracer-probe.out", "control-one.out", "control-two.out"}
+        self.assertTrue(expected <= set(saved))
+        self.assertFalse(set(saved) - expected - {"tracer-probe.syscalls"})
+        self.assertEqual(saved["result.txt"],
+                         "first_rc=0\nsecond_rc=0\nsubmitted=1\ndistinct=1\ncontrols_rc=0\n")
+        for label in ("submit-one", "submit-two"):
+            self.assertTrue(saved[f"{label}.trace"])
+            self.assertIn("fixture-child-stdout", saved[f"{label}.out"])
+            self.assertIn("fixture-child-stderr", saved[f"{label}.out"])
+            records = [json.loads(line) for line in saved[f"{label}.provenance"].splitlines()
+                       if line.startswith("{")]
+            self.assertTrue(any(r["phase"] == "before" for r in records))
+            self.assertTrue(any(r["phase"] == "after-boundary" and r["next_boundary_status"] != 0
+                                for r in records))
+            # The failed `if mkdir` has a zero status at the next boundary. Do
+            # not mislabel it the mkdir result; only syscall evidence is that.
+            self.assertTrue(any(r["phase"] == "after-boundary" and r["next_boundary_status"] == 0
+                                and "REQRECORD_STATUS_LOCK" in r["command"] for r in records))
+            self.assertTrue(all("previous_status" not in r for r in records))
+            self.assertTrue(any("inode" in r["locks"][1] and
+                                r["locks"][1]["path"].endswith(".notify-status.lock") for r in records))
+            self.assertTrue(all("inode" in r["parent"] and r["mount_namespace"] for r in records))
+        controls = dict(line.split("=", 1) for line in saved["lock-controls.out"].splitlines()
+                        if "=" in line and line.split("=", 1)[0].endswith("_rc"))
+        self.assertEqual(controls["resolved_first_rc"], "0")
+        self.assertNotEqual(controls["resolved_second_rc"], "0")
+        self.assertEqual(sum(controls[k] == "0" for k in ("contention_one_rc", "contention_two_rc")), 1)
+        self.assertNotIn("must-not-reach-child-trace", "".join(saved.values()))
+        self.assertNotIn("startup.sh", "".join(saved.values()))
+        loser = "one" if controls["contention_one_rc"] != "0" else "two"
+        self.assertTrue(saved[f"control-{loser}.out"])
+
+    def test_unusable_tracer_does_not_replace_original_submissions(self):
+        result, saved = self.run_concurrency(distinct=True, rejected_tracer=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("first_rc=0\nsecond_rc=0\nsubmitted=2\ndistinct=2\ncontrols_rc=0\n", saved["result.txt"])
+        self.assertIn("fixture-probe-denied", saved["tracer-probe.out"])
+        self.assertIn("probe_rc=73", saved["tracer-probe.out"])
+        for label in ("submit-one", "submit-two", "lock-controls"):
+            self.assertEqual(saved[f"{label}.syscalls"], "syscall_tracer=unavailable\nprobe_rc=73\n")
+        self.assertIn("fixture-child-stdout", saved["submit-one.out"])
+
+    def test_passing_experiment_still_retains_evidence(self):
+        result, saved = self.run_concurrency(distinct=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("submitted=2\ndistinct=2\ncontrols_rc=0\n", saved["result.txt"])
+        self.assertTrue(saved["submit-one.provenance"])
+        self.assertTrue(saved["submit-two.syscalls"])
+
+    def test_permissive_command_is_discriminated_without_product_change(self):
+        result, saved = self.run_concurrency(distinct=True, permissive_mkdir=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("submitted=2\ndistinct=2\ncontrols_rc=1\n", saved["result.txt"])
+        self.assertIn("resolved_second_rc=0\n", saved["lock-controls.out"])
+        self.assertIn("native_second_rc=1\n", saved["lock-controls.out"])
+        self.assertIn("/bin/mkdir", saved["submit-one.provenance"])
+        self.assertIn('"shebang":', saved["submit-one.provenance"])
 
 
 if __name__ == "__main__":
