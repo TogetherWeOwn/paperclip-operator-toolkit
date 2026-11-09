@@ -46,13 +46,22 @@ from worker initialization. The default model-selection artifact must omit
 `run.model.resolve`; the held shared schema must reject its opt-in declaration.
 No type cast or direct callback invocation counts as a stock RPC dispatcher.
 
+`shared-contract.mjs` adds sync/async public-schema controls at each resolved
+consumer. Both config-envelope exports must accept two distinct valid GUID company
+IDs and reject missing/malformed IDs, arrays and null configs. A tiny nested value
+is deliberately accepted: the permissive envelope does not establish key, depth or
+collection bounds or validate the plugin's JSON Schema. Built manifests must pass
+while wrong API versions and malformed capabilities fail. Reports distinguish these
+30 Insight / 32 model-selection cases from host-loader/Ajv routes and authorization.
+These additional cases are prepared source pending new-head Actions results.
+
 `zod-collection-counter.mjs` exercises sync and async arrays with at most three
 elements. The Zod3 baseline deliberately asserts **three element visits on an
 oversized array**, two visits on valid at-limit input, three on an unbounded
 array, and zero refinements on a structurally invalid element. A green baseline
 therefore **records the affected primitive**, not containment. The same small
-probe accepts an explicit zero-visit expectation for a separately reviewed
-patched candidate; no such candidate is installed by these jobs.
+probe accepts an explicit zero-visit expectation for the separately reviewed
+candidate installed only in the isolated lane described below.
 
 ## Real worker wire evidence, not stock authorization
 
@@ -107,7 +116,9 @@ is byte-identical to its reviewed artifact, SHA-256
 The old artifact's name used GitHub's synthetic merge SHA, not the PR head; the run
 API identifies the head above. New artifacts explicitly use the PR head SHA.
 
-The **new clean-install/probe steps are prepared, not yet passing evidence**:
+The synthetic lane passed at head `103e3ad1c55b6bf20193fac306a4f11c58d34113`
+in [job 129125687981](https://github.com/TogetherWeOwn/paperclip-operator-toolkit/actions/runs/42607082044/job/129125687981).
+That exact-head evidence covers these steps, not later source changes:
 
 - Node 24.22.2 supplies npm 11.19.1; a different npm version fails closed, with no
   toolchain upgrade. Effective native policy is `min-release-age=3`,
@@ -144,7 +155,17 @@ The **new clean-install/probe steps are prepared, not yet passing evidence**:
   or counter pass is not either real plugin's compatibility, a stock scheduler,
   authorization/config result, complete containment or release approval.
 
-### Built-plugin candidate lane — prepared, not yet passing
+### Built-plugin candidate lane — passing runtime subset at a pinned head
+
+At head `103e3ad1c55b6bf20193fac306a4f11c58d34113`, the
+[Insight job](https://github.com/TogetherWeOwn/paperclip-operator-toolkit/actions/runs/42607082204/job/129126363623)
+and [model-selection job](https://github.com/TogetherWeOwn/paperclip-operator-toolkit/actions/runs/42607082204/job/129133149281)
+passed their held Node24/Node22 controls and isolated candidate runtime steps.
+This includes tiny bounded/unbounded counters, real worker/wire controls and the
+separate signal-loss probe. It does not qualify later source changes or establish
+source compilation, stock authorization/scheduling/config routes or migration.
+Full CI had not completed at inspection. The shared-contract cases added afterward
+remain pending Actions.
 
 At head `efb3f7d642521b225a18b427cbba9574fd01ab5e`, [the native policy
 job](https://github.com/TogetherWeOwn/paperclip-operator-toolkit/actions/runs/42604290875/job/129116153603)
@@ -186,17 +207,23 @@ config-route/scheduler qualification, source migration or operational adoption.
   Node22 drop-in**. The lock review permits only the isolated Actions candidate
   lane after its native probes pass, not a source-pin change. Existing plugin
   install and build steps are unchanged.
-- The observed installed-versus-registry metadata differences for 2026.1106.0
-  are unresolved. That pair must not be installed before its native age gate;
-  a matching version label is not artifact equivalence.
+- A 2026-11-09 read-only comparison corrects the earlier metadata discrepancy
+  report for 2026.1106.0: registry and SHA-512-verified tarball metadata both declare
+  Node >=24.11.0, and shared declares `three@0.185.1`. Six selected installed files
+  (SDK manifest/root export/worker bridge/host-client factory; shared manifest/plugin
+  validator) match their tar members byte-for-byte. This is not whole-tree,
+  server/image/transitive integrity or candidate831/host1106 equivalence. The 1106
+  pair remains barred from installation until after 2026-11-09T22:20:56.514Z and
+  native age-policy acceptance, without exception. No 1106 package was installed,
+  extracted, imported or executed for this read-only comparison.
 - Locate and exercise the privately maintained stock-service harness with the
   actual supported scheduler/worker-manager/authorization implementation and
   inert adapters. Prove same-company success and denied-capability, missing
   identity and cross-company zero unauthorized effects there. This wire harness
   cannot substitute for it.
-- Exercise actual host config-save/Ajv and manifest-load paths, and obtain Actions
-  results for the separate AbortSignal serializer probe. HTTP byte caps, a post-readline
-  character guard, pre-JSON allocation, collection/key/depth bounds and
+- Exercise actual host config-save/Ajv and manifest-load paths. Passing shared-schema
+  or wire/signal probes cannot satisfy these caller boundaries. HTTP byte caps, a
+  post-readline character guard, pre-JSON allocation, collection/key/depth bounds and
   pre-Zod traversal are different boundaries. No complete containment is claimed.
 - Zod4 early size rejection leaves unbounded schemas unchanged. Source migration
   requires a supported caller/engine contract, bounded compatibility verdict,

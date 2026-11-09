@@ -5,6 +5,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { collectionCounters } from './zod-collection-counter.mjs';
+import { sharedContract } from './shared-contract.mjs';
 
 export async function packageIdentity(entry, expectedName) {
   for (let root = dirname(entry); ; root = dirname(root)) {
@@ -73,14 +74,8 @@ export async function inspectConsumer(pluginRoot, candidateRoot) {
   const manifest = manifestModule.default;
   assert.equal(manifest.apiVersion, 1);
   assert(!manifest.capabilities.includes('run.model.resolve'), 'Stock qualification must not enable the opt-in capability');
-  const { pluginManifestV1Schema } = await import(pathToFileURL(shared).href);
-  const parsed = pluginManifestV1Schema.safeParse(manifest);
-  assert(parsed.success, `Actual shared manifest validator refused built manifest: ${JSON.stringify(parsed.error?.issues)}`);
-  if (manifestModule.buildManifest) {
-    const optIn = manifestModule.buildManifest(true);
-    assert(optIn.capabilities.includes('run.model.resolve'));
-    assert.equal(pluginManifestV1Schema.safeParse(optIn).success, false, 'Resolved shared schema unexpectedly accepts the opt-in fork capability');
-  }
+  const sharedSchemas = await import(pathToFileURL(shared).href);
+  const schemas = await sharedContract(sharedSchemas, manifest, manifestModule.buildManifest?.(true));
   const counters = [];
   for (const entry of new Set([sdkZod, sharedZod])) {
     const { z } = await import(pathToFileURL(entry).href);
@@ -90,7 +85,7 @@ export async function inspectConsumer(pluginRoot, candidateRoot) {
   return { root, worker, manifest, sdk, report: { plugin: source.name, node: process.versions.node,
     buildTarget: 'node22 (unchanged)', sourceEngine: source.engines.node, edges, counters,
     lockIntegrityFieldsComplete: edges.every(({ integrity }) => integrity !== null),
-    manifestValidated: true, stockHostQualified: false, migrationQualified: false,
+    manifestValidated: true, schemas, stockHostQualified: false, migrationQualified: false,
     candidate: { sdk: '2026.831.0', shared: '2026.831.0', zod: '4.6.7',
       node22DropIn: false, requiredNode: '>=24.11.0', installed: Boolean(candidateRoot),
       boundary: candidateRoot ? 'Byte-identical held build staged against isolated candidate runtime; no candidate typecheck or source migration'
