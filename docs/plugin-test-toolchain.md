@@ -75,7 +75,9 @@ New/changed artifact integrity values were compared with exact-version registry
 metadata. Every previously locked runtime package entry is unchanged, including
 SDK/shared 2026.824.1 and transitive Zod. Unrelated exact edges such as Rollup's
 `@types/estree` 1.0.9 and `stackback` 0.0.2 are retained. Compatible source-map-js
-and fast-uri patches are separate source work, not duplicated by this migration.
+and fast-uri patches were adopted from merged PR #110, including its
+lock/installed-copy security tests; this migration extends those tests with the
+qualified toolchain pins rather than introducing a competing patch group.
 
 Neither root has install/prepare/pack hooks. The new lock's install-hook
 candidates are esbuild 0.25.1 (`node install.js`) and unchanged optional macOS
@@ -91,6 +93,12 @@ because they read the key. Resolution uses the verified native npm version;
 Actions must record its actual install tool version and keep script refusal.
 No plugin installation, host-package update, credential or provider change is
 part of this migration. SDK/Zod advisories remain unresolved by this work.
+After adopting PR #110, lock-only audits of both plugins exit 1 with three high
+package entries each: SDK, shared and Zod (the same transitive Zod advisory).
+No Vitest, mocker, Vite, esbuild, Tinypool, source-map-js or fast-uri finding is
+reported. These are package-entry counts, not GitHub alert counts or advisory
+acceptance. The SDK/shared/Zod entries remain unchanged; their separate
+compatibility follow-up and installation holds remain in force.
 
 ## Pool and mutation API qualification
 
