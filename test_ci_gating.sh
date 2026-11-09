@@ -162,7 +162,12 @@ mutate ciok-blind-to-scan '      - disclosure-scan
     steps:
       - name: Aggregate gated results'
 expect_fail ciok-blind-to-scan "$MUTANT_FILE"
-mutate ciok-blind-to-toolchain '      - plugin-toolchain-qualification' '      # toolchain qualification dependency removed'
+# Scope the anchor to ci-ok, not the earlier failure-log-drain dependency.
+mutate ciok-blind-to-toolchain '      - plugin-toolchain-qualification
+    steps:
+      - name: Aggregate gated results' '      # toolchain qualification dependency removed
+    steps:
+      - name: Aggregate gated results'
 expect_fail ciok-blind-to-toolchain "$MUTANT_FILE"
 # sdlc_foundation step deleted (its header comment kept): the suite cannot
 # guard its own presence, so this independent gate must go red.
