@@ -16,11 +16,9 @@
 #   ORG_SNAPSHOT  a TSV org fixture read instead of the live database
 #   PROV          a stub provisioner
 #
-# A note on the concurrency tests. `&` plus `wait` is a weak scheduler and a
-# race that reproduces every time here could hide on a faster host. So they are
-# written to fail CLOSED: each asserts an invariant that must hold whether or
-# not the race is won this run. A run that never collides still passes, and a
-# run that does collide fails for a reason, never flakily.
+# Concurrent success is checked with both child exit statuses and exactly two
+# distinct submissions. The allocation-read failure uses FIFO barriers to prove
+# lock contention after a durable commit; it does not depend on scheduler luck.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -108,34 +106,98 @@ hdr "1. A request id names exactly one request"
 # inside DIR's request ceiling, so nothing here is a ceiling violation; the
 # violation is that the decision does not bind to what was decided.
 reset
-( "$Q" submit --requester DIR --template E0_SPECIALIST --title "IRQ Junior web engineer"   >/dev/null 2>&1 ) &
-( "$Q" submit --requester DIR --template D1_MANAGER    --title "IRQ Engineering manager"   >/dev/null 2>&1 ) &
-wait
+"$Q" submit --requester DIR --template E0_SPECIALIST --title "IRQ Junior web engineer" >"$TMP/submit-one.out" 2>&1 &
+first_pid=$!
+"$Q" submit --requester DIR --template D1_MANAGER --title "IRQ Engineering manager" >"$TMP/submit-two.out" 2>&1 &
+second_pid=$!
+wait "$first_pid"; first_rc=$?
+wait "$second_pid"; second_rc=$?
 total="$(jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" | wc -l)"
 uniq_n="$(jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" | sort -u | wc -l)"
-if [[ "$total" -eq "$uniq_n" ]]; then
-  ok "concurrent submissions received distinct request ids ($total submitted, $uniq_n distinct)"
+if [[ "$first_rc" -eq 0 && "$second_rc" -eq 0 && "$total" -eq 2 && "$uniq_n" -eq 2 ]]; then
+  ok "both concurrent submissions succeeded with distinct request ids"
 else
-  bad "two concurrent submissions collided on one request id ($total submitted, $uniq_n distinct)"
+  bad "concurrent allocation failed (exits $first_rc/$second_rc, $total submitted, $uniq_n distinct)"
+  cat "$TMP/submit-one.out" "$TMP/submit-two.out"
   jq -r 'select(.event=="request.submitted")|"        \(.requestId)  \(.template)  \(.title)"' "$QUEUE"
-  note "next_id() counts existing rows and appends; nothing serialises the read"
 fi
 
-# Fails closed: if the race did not fire this run, there is no duplicate to
-# approve and the invariant below holds trivially.
-dup="$(jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" | sort | uniq -d | head -1)"
-if [[ -z "$dup" ]]; then
-  ok "no duplicate id to decide (race did not fire this run)"
+# The locks serialize a successful count, but a failed count must not become
+# zero. Hold A after its durable commit, make B contend for its queue lock, then
+# fail only B's allocation read after A unlocks. Without explicit propagation,
+# B appends a second REQ-001 even though both critical sections were locked.
+reset
+FAULT_BIN="$TMP/allocation-bin"; mkdir "$FAULT_BIN"
+export ALLOCATION_SYNC="$TMP/allocation-sync"
+mkdir "$ALLOCATION_SYNC"
+mkfifo "$ALLOCATION_SYNC/committed" "$ALLOCATION_SYNC/contended" "$ALLOCATION_SYNC/release"
+exec 6<>"$ALLOCATION_SYNC/committed" 7<>"$ALLOCATION_SYNC/contended" 8<>"$ALLOCATION_SYNC/release"
+export ALLOCATION_REAL_JQ="$(command -v jq)" ALLOCATION_REAL_MKDIR="$(command -v mkdir)"
+export ALLOCATION_REAL_WRITER="$HERE/lib/durable_queue.py"
+cat > "$FAULT_BIN/writer" <<'WRITER'
+#!/usr/bin/env bash
+"$ALLOCATION_REAL_WRITER" "$@" || exit $?
+if [[ "$1" == "append-batch" ]]; then
+  printf 'committed\n' > "$ALLOCATION_SYNC/committed"
+  IFS= read -r -t 10 release < "$ALLOCATION_SYNC/release" || exit 91
+fi
+WRITER
+cat > "$FAULT_BIN/mkdir" <<'MKDIR'
+#!/usr/bin/env bash
+"$ALLOCATION_REAL_MKDIR" "$@"; rc=$?
+if [[ "$*" == "${QUEUE}.lock" && $rc -ne 0 && ! -f "$ALLOCATION_SYNC/contended-once" ]]; then
+  : > "$ALLOCATION_SYNC/contended-once"
+  printf 'contended\n' > "$ALLOCATION_SYNC/contended"
+fi
+exit "$rc"
+MKDIR
+cat > "$FAULT_BIN/jq" <<'JQ'
+#!/usr/bin/env bash
+if [[ $# -eq 3 && "$1" == "-r" && "$2" == 'select(.event=="request.submitted")|.requestId' && "$3" == "$QUEUE" ]]; then
+  : > "$ALLOCATION_SYNC/read-failed"
+  printf 'injected allocation read failure\n' >&2
+  exit 7
+fi
+exec "$ALLOCATION_REAL_JQ" "$@"
+JQ
+chmod +x "$FAULT_BIN/writer" "$FAULT_BIN/mkdir" "$FAULT_BIN/jq"
+REQRECORD_DURABLE_WRITER="$FAULT_BIN/writer" "$Q" submit --requester DIR --template E0_SPECIALIST \
+  --title "IRQ committed before read failure" >"$TMP/committed.out" 2>&1 &
+first_pid=$!
+committed=""; contended=""
+IFS= read -r -t 10 -u 6 committed || bad "first submit did not reach its durable commit barrier"
+jq -c 'select(.event=="request.submitted" or .event=="notify.queued")' "$QUEUE" > "$TMP/intent-before"
+# Like the isolated PATH fixture below, ignore startup hooks only in this
+# offline child so they cannot silently replace the recording fakes.
+BASH_ENV=/dev/null PATH="$FAULT_BIN:$PATH" "$Q" submit --requester DIR --template D1_MANAGER \
+  --title "IRQ allocation read failure" >"$TMP/read-failure.out" 2>&1 &
+second_pid=$!
+IFS= read -r -t 10 -u 7 contended || bad "second submit did not contend for the held queue lock"
+printf 'release\n' >&8
+wait "$first_pid"; first_rc=$?
+wait "$second_pid"; second_rc=$?
+exec 6>&- 7>&- 8>&-
+if [[ "$committed" == committed && "$contended" == contended && -f "$ALLOCATION_SYNC/read-failed" && "$first_rc" -eq 0 ]]; then
+  ok "allocation read fault was reached only after a competing durable commit"
 else
-  want="$(jq -r --arg r "$dup" 'select(.event=="request.submitted" and .requestId==$r)|.template' "$QUEUE" | head -1)"
-  "$Q" review --reviewer T0 --request "$dup" --approve --reason "approving the row I read" >/dev/null 2>&1
-  got="$(cut -f2 "$CREATE_ARGV" 2>/dev/null | tail -1)"
-  if [[ -z "$got" || "$got" == "$want" ]]; then
-    ok "the approval provisioned the template the reviewer was shown ($want)"
-  else
-    bad "the reviewer was shown '$want' and the queue provisioned '$got'"
-    note "review binds to the request ID; request_submission() takes tail -1"
-  fi
+  bad "allocation fault fixture did not exercise the intended interleaving"
+  cat "$TMP/committed.out" "$TMP/read-failure.out"
+fi
+jq -c 'select(.event=="request.submitted" or .event=="notify.queued")' "$QUEUE" > "$TMP/intent-after"
+if [[ "$second_rc" -eq 2 ]] && cmp -s "$TMP/intent-before" "$TMP/intent-after"; then
+  ok "a failed allocation read refuses without publishing a request or notification intent"
+else
+  bad "a failed allocation read was treated as a usable request id (exit $second_rc)"
+  cat "$TMP/read-failure.out"
+  jq -c 'select(.event=="request.submitted")|{requestId,template}' "$QUEUE"
+fi
+if [[ ! -d "${QUEUE}.lock" && ! -d "${QUEUE}.notify-status.lock" ]] \
+    && "$Q" submit --requester DIR --template D1_MANAGER --title "IRQ after allocation refusal" >"$TMP/after-refusal.out" 2>&1 \
+    && [[ "$(last_sub)" == REQ-002 ]]; then
+  ok "allocation refusal releases both locks and the next valid submission receives REQ-002"
+else
+  bad "allocation refusal leaked a lock or changed the next request id"
+  cat "$TMP/after-refusal.out" 2>/dev/null || true
 fi
 
 # ===========================================================================

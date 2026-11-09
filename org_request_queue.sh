@@ -1166,7 +1166,11 @@ cmd_submit() {
   local rid exp submission rc; exp="$(plus_days "$REQUEST_TTL_DAYS")"
   queue_lock
   reqrecord_status_lock
-  rid="$(reqrecord_next_id)"
+  if ! rid="$(reqrecord_next_id)"; then
+    reqrecord_status_unlock
+    queue_unlock
+    die "could not allocate a request id."
+  fi
   submission="$(jq -cn --arg id "$rid" --arg r "$requester" --arg rid2 "$id" --arg rt "$requester_title" --arg t "$tpl" \
     --arg w "$template" --arg ti "$title" --arg ra "$rationale" --arg sup "$supersedes" \
     --arg root "$root" --argjson d "$depth" --arg at "$(now_iso)" --arg exp "$exp" \
