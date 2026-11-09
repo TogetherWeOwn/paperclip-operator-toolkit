@@ -3855,8 +3855,6 @@ jobs:
                 else
                   echo "::error::the UNMUTATED copy of $suite already fails (rc=$base_rc) — mutation gates prove nothing" >&2
                 fi
-                grep -E 'FAIL|RESULT' "$output" >&2 || true
-                tail -20 "$output" >&2
                 return "$base_rc"
               fi
               : > "$dir/.baseline-passed"
@@ -3874,6 +3872,16 @@ jobs:
             echo "::group::$label $phase: $suite (rc=$result)"
             tail -c 16384 "$output" | tail -n 80
             echo "::endgroup::"
+          }
+
+          # Preserve both the assertion control and any owner run before an
+          # exceptional sentinel/cleanup exit removes their temporary directory.
+          mutation_assertion_diagnostic() {
+            local label="$1" suite="$2" result="$3" dir="$4" baseline_result="$5"
+            mutation_diagnostic "$label" assertion-baseline "$suite" "$baseline_result" "$dir/.assertion-baseline-output"
+            if [[ -f "$dir/.mutant-output" ]]; then
+              mutation_diagnostic "$label" owner "$suite" "$result" "$dir/.mutant-output"
+            fi
           }
 
           mutation_check() {
@@ -3913,11 +3921,12 @@ jobs:
               local base_rc=$?
               if [[ $base_rc -ne 0 ]]; then
                 echo "::error::$label: assertion baseline failed in $suite (rc=$base_rc)"
-                tail -20 "$mut/.assertion-baseline-output"
+                mutation_assertion_diagnostic "$label" "$suite" "$base_rc" "$mut" "$base_rc"
                 rm -rf "$mut"; return 1
               fi
               if ! grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
                 echo "::error::$label: baseline passed without reaching the required $required_assertion assertion"
+                mutation_assertion_diagnostic "$label" "$suite" "$base_rc" "$mut" "$base_rc"
                 rm -rf "$mut"; return 1
               fi
             fi
@@ -3967,17 +3976,19 @@ jobs:
             elif [[ -n "$required_assertion" ]]; then
               if grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
                 echo "::error::$label: mutant reached the passing $required_assertion assertion"
+                mutation_assertion_diagnostic "$label" "$suite" "$mut_rc" "$mut" "$base_rc"
                 rm -rf "$mut"; return 1
               fi
               if [[ -n "$assertion_armed" ]] \
                 && ! grep -qxF "$assertion_armed" "$assertion_sentinel" 2>/dev/null; then
                 echo "::error::$label: mutant timed out before arming the intended TERM assertion"
+                mutation_assertion_diagnostic "$label" "$suite" "$mut_rc" "$mut" "$base_rc"
                 rm -rf "$mut"; return 1
               fi
               if [[ $mut_rc -ne 124 ]] \
                 || ! grep -qxF "MUTATION_WATCHDOG: watched descendant terminated" "$mutant_output"; then
                 echo "::error::$label: mutant did not time out with attributable descendant cleanup (rc=$mut_rc)"
-                tail -20 "$mutant_output"
+                mutation_assertion_diagnostic "$label" "$suite" "$mut_rc" "$mut" "$base_rc"
                 rm -rf "$mut"; return 1
               fi
               echo "  ok  $label — TERM assertion armed and blocked; watchdog terminated the escaped descendant"

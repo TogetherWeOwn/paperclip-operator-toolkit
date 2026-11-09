@@ -14,13 +14,21 @@ import time
 def identity(path, *, executable=False, interpreter=True):
     result = {"path": str(path), "observed_ns": time.time_ns()}
     try:
-        target = Path(path).resolve(strict=True)
-        stat = target.stat()
-        result.update(canonical=str(target), device=stat.st_dev, inode=stat.st_ino)
+        # A proc executable link can name an unlinked image. Open the handle,
+        # never its readlink/realpath text, and stat/hash that same open image.
+        if Path(path).is_symlink():
+            result["symlink_target"] = os.readlink(path)
+        result["canonical"] = str(Path(path).resolve(strict=False))
         if executable:
-            result["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
-            with target.open("rb") as stream:
+            with open(path, "rb") as stream:
+                stat = os.fstat(stream.fileno())
+                result.update(device=stat.st_dev, inode=stat.st_ino)
                 first = stream.readline(256)
+                stream.seek(0)
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: stream.read(65536), b""):
+                    digest.update(chunk)
+                result["sha256"] = digest.hexdigest()
             result["format"] = "ELF" if first.startswith(b"\x7fELF") else "other"
             if first.startswith(b"#!"):
                 result["shebang"] = first.decode(errors="replace").strip()
@@ -32,6 +40,9 @@ def identity(path, *, executable=False, interpreter=True):
                             candidate = shutil.which(words[1])
                             result["env_interpreter_candidate"] = (
                                 identity(candidate, executable=True, interpreter=False) if candidate else None)
+        else:
+            stat = Path(path).stat()
+            result.update(device=stat.st_dev, inode=stat.st_ino)
     except ValueError as error:
         result["shebang_error"] = str(error)
     except (OSError, RuntimeError) as error:

@@ -109,26 +109,31 @@ reset
 # Opt-in Actions diagnostics cover only these two synthetic submissions. Never
 # trace an inherited environment: queue startup can otherwise expand credentials.
 diagnostic_tracer=()
+diagnostic_root="$TMP"
 if [[ -n "${REQUEST_RECORD_DIAGNOSTICS_DIR:-}" ]]; then
+  # Open child evidence in its retained destination before either launch. An
+  # interrupted wait must not depend on reaching the post-oracle copy/controls.
+  mkdir -p "$REQUEST_RECORD_DIAGNOSTICS_DIR" || exit 1
+  diagnostic_root="$(cd "$REQUEST_RECORD_DIAGNOSTICS_DIR" && pwd)" || exit 1
   # Probe only a separate credential-free no-op before launching either child.
   # An installed tracer can lack ptrace permission; never retry a submission.
   tracer_rc=127
   if command -v strace >/dev/null; then
     diagnostic_tracer=(strace -f -ttt -T -s 256 -e trace=execve,mkdir,mkdirat,unlink,unlinkat,rmdir,exit_group,wait4,chdir)
     env -i PATH="$PATH" HOME="$TMP" timeout --kill-after=1 5 \
-      "${diagnostic_tracer[@]}" -o "$TMP/tracer-probe.syscalls" /usr/bin/true \
-      >"$TMP/tracer-probe.out" 2>&1; tracer_rc=$?
+      "${diagnostic_tracer[@]}" -o "$diagnostic_root/tracer-probe.syscalls" /usr/bin/true \
+      >"$diagnostic_root/tracer-probe.out" 2>&1; tracer_rc=$?
   fi
-  printf 'probe_rc=%s\n' "$tracer_rc" >> "$TMP/tracer-probe.out"
+  printf 'probe_rc=%s\n' "$tracer_rc" >> "$diagnostic_root/tracer-probe.out"
   [[ "$tracer_rc" -eq 0 ]] || diagnostic_tracer=()
 fi
 diagnostic_submit() {
   local label="$1" script="$2"; shift 2
   local -a observer=()
   if [[ "${#diagnostic_tracer[@]}" -gt 0 ]]; then
-    observer=("${diagnostic_tracer[@]}" -o "$TMP/$label.syscalls")
+    observer=("${diagnostic_tracer[@]}" -o "$diagnostic_root/$label.syscalls")
   else
-    printf 'syscall_tracer=unavailable\nprobe_rc=%s\n' "$tracer_rc" > "$TMP/$label.syscalls"
+    printf 'syscall_tracer=unavailable\nprobe_rc=%s\n' "$tracer_rc" > "$diagnostic_root/$label.syscalls"
   fi
   if [[ "$label" == lock-controls ]]; then
     observer=(timeout --kill-after=1 10 "${observer[@]}")
@@ -141,7 +146,7 @@ diagnostic_submit() {
     REQUEST_RECORD_OBSERVER_METADATA="$HERE/test/request_record_provenance.py" \
     BASH_ENV="$HERE/test/request_record_provenance.sh" \
     BASH_XTRACEFD=9 PS4='+ ${EPOCHREALTIME} ${BASHPID} ${BASH_SOURCE}:${LINENO}: ' \
-    "${observer[@]}" bash -x "$script" "$@" 8>"$TMP/$label.provenance" 9>"$TMP/$label.trace"
+    "${observer[@]}" bash -x "$script" "$@" 8>"$diagnostic_root/$label.provenance" 9>"$diagnostic_root/$label.trace"
 }
 concurrent_submit() {
   local label="$1"; shift
@@ -151,9 +156,9 @@ concurrent_submit() {
     "$Q" "$@"
   fi
 }
-concurrent_submit submit-one submit --requester DIR --template E0_SPECIALIST --title "IRQ Junior web engineer" >"$TMP/submit-one.out" 2>&1 &
+concurrent_submit submit-one submit --requester DIR --template E0_SPECIALIST --title "IRQ Junior web engineer" >"$diagnostic_root/submit-one.out" 2>&1 &
 first_pid=$!
-concurrent_submit submit-two submit --requester DIR --template D1_MANAGER --title "IRQ Engineering manager" >"$TMP/submit-two.out" 2>&1 &
+concurrent_submit submit-two submit --requester DIR --template D1_MANAGER --title "IRQ Engineering manager" >"$diagnostic_root/submit-two.out" 2>&1 &
 second_pid=$!
 wait "$first_pid"; first_rc=$?
 wait "$second_pid"; second_rc=$?
@@ -163,7 +168,7 @@ if [[ "$first_rc" -eq 0 && "$second_rc" -eq 0 && "$total" -eq 2 && "$uniq_n" -eq
   ok "both concurrent submissions succeeded with distinct request ids"
 else
   bad "concurrent allocation failed (exits $first_rc/$second_rc, $total submitted, $uniq_n distinct)"
-  cat "$TMP/submit-one.out" "$TMP/submit-two.out"
+  cat "$diagnostic_root/submit-one.out" "$diagnostic_root/submit-two.out"
   jq -r 'select(.event=="request.submitted")|"        \(.requestId)  \(.template)  \(.title)"' "$QUEUE"
 fi
 if [[ -n "${REQUEST_RECORD_DIAGNOSTICS_DIR:-}" ]]; then
@@ -171,13 +176,8 @@ if [[ -n "${REQUEST_RECORD_DIAGNOSTICS_DIR:-}" ]]; then
   # or serialize its submissions; they start only after its oracle is evaluated.
   control_root="$(mktemp -d "$TMP/lock-controls.XXXXXX")"
   diagnostic_submit lock-controls "$HERE/test/request_record_provenance.sh" "$control_root" \
-    >"$TMP/lock-controls.out" 2>&1; controls_rc=$?
+    >"$diagnostic_root/lock-controls.out" 2>&1; controls_rc=$?
   [[ "$controls_rc" -eq 0 ]] || bad "isolated command/filesystem control failed (exit $controls_rc)"
-  mkdir -p "$REQUEST_RECORD_DIAGNOSTICS_DIR"
-  cp "$TMP/submit-one."{trace,provenance,syscalls,out} \
-    "$TMP/submit-two."{trace,provenance,syscalls,out} \
-    "$TMP/lock-controls."{trace,provenance,syscalls,out} "$TMP/tracer-probe.out" "$REQUEST_RECORD_DIAGNOSTICS_DIR/"
-  [[ ! -f "$TMP/tracer-probe.syscalls" ]] || cp "$TMP/tracer-probe.syscalls" "$REQUEST_RECORD_DIAGNOSTICS_DIR/"
   for contender in one two; do
     [[ ! -f "$control_root/$contender.out" ]] || \
       cp "$control_root/$contender.out" "$REQUEST_RECORD_DIAGNOSTICS_DIR/control-$contender.out"
