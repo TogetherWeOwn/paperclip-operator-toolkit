@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent
@@ -420,7 +421,18 @@ class ExecutableIdentityDiagnostics(unittest.TestCase):
                             self.assertEqual(record["format"], "ELF")
                             self.assertEqual(record["symlink_target"], str(image) + " (deleted)")
                             if state == "canonical-loop":
-                                self.assertIn("canonical_error", record)
+                                # Non-strict resolve can return the loop path or
+                                # raise, depending on Python. Force the error
+                                # branch without relying on that version detail.
+                                with mock.patch.object(observer.Path, "resolve", side_effect=RuntimeError(
+                                    "fixture canonical loop"
+                                )):
+                                    failed_metadata = observer.identity(
+                                        f"/proc/{child.pid}/exe", executable=True)
+                                self.assertIn("canonical_error", failed_metadata)
+                                self.assertNotIn("error", failed_metadata)
+                                for key in ("sha256", "inode", "device", "format", "symlink_target"):
+                                    self.assertEqual(failed_metadata[key], record[key])
                     # Ordinary paths must still detect changed bytes; no hash cache.
                     shutil.copyfile("/usr/bin/true", image)
                     self.assertNotEqual(observer.identity(image, executable=True)["sha256"], expected_hash)
