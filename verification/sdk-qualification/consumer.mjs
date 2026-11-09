@@ -19,25 +19,35 @@ export async function packageIdentity(entry, expectedName) {
   }
 }
 
-export async function inspectConsumer(pluginRoot) {
+export async function inspectConsumer(pluginRoot, candidateRoot) {
   const root = await realpath(pluginRoot);
+  const lockRoot = candidateRoot ? await realpath(candidateRoot) : root;
+  if (candidateRoot) {
+    assert.equal(Number(process.versions.node.split('.')[0]), 24);
+    assert(relative(lockRoot, root).startsWith(`consumers/`), 'Candidate artifact must be staged inside its isolated install');
+    const policy = JSON.parse(await readFile(join(lockRoot, 'native-policy.json'), 'utf8'));
+    assert.equal(policy.nativePolicyProbes.length, 6);
+  }
   const worker = await realpath(join(root, 'dist/worker.js'));
-  const lock = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
+  const lock = JSON.parse(await readFile(join(lockRoot, 'package-lock.json'), 'utf8'));
   const source = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   assert.equal(source.dependencies['@paperclipai/plugin-sdk'], '2026.824.1', 'Held source pin changed');
-  const expected = { '@paperclipai/plugin-sdk': '2026.824.1', '@paperclipai/shared': '2026.824.1', zod: '3.25.76' };
+  const expected = candidateRoot
+    ? { '@paperclipai/plugin-sdk': '2026.831.0', '@paperclipai/shared': '2026.831.0', zod: '4.6.7' }
+    : { '@paperclipai/plugin-sdk': '2026.824.1', '@paperclipai/shared': '2026.824.1', zod: '3.25.76' };
   const edges = [];
   async function edge(name, parent) {
     const entry = await realpath(fileURLToPath(import.meta.resolve(name, pathToFileURL(parent).href)));
     const identity = await packageIdentity(entry, name);
-    const lockPath = relative(root, identity.root).split('\\').join('/');
+    const lockPath = relative(lockRoot, identity.root).split('\\').join('/');
     assert(lockPath.startsWith('node_modules/') && !lockPath.split('/').includes('..'), 'Resolution escaped consumer install');
+    if (candidateRoot) assert.equal(lockPath, `node_modules/${name}`, 'Candidate must resolve only its reviewed closure');
     assert.equal(identity.manifest.version, expected[name], `Unexpected ${name} consumer version`);
     assert.equal(lock.packages[lockPath]?.version, expected[name], 'Installed version differs from this consumer lock');
     const integrity = lock.packages[lockPath].integrity ?? null;
     // The held Insight lock omits these fields. Record that adverse baseline;
     // do not manufacture provenance or silently relax the other consumer's gate.
-    if (source.name === '@togetherweown/paperclip-cliproxy-insight') {
+    if (!candidateRoot && source.name === '@togetherweown/paperclip-cliproxy-insight') {
       assert.equal(integrity, null, 'Held Insight lock metadata changed; review its provenance separately');
     } else {
       assert.match(integrity ?? '', /^sha512-/, 'Missing registry integrity');
@@ -69,19 +79,22 @@ export async function inspectConsumer(pluginRoot) {
   if (manifestModule.buildManifest) {
     const optIn = manifestModule.buildManifest(true);
     assert(optIn.capabilities.includes('run.model.resolve'));
-    assert.equal(pluginManifestV1Schema.safeParse(optIn).success, false, 'Held stock schema unexpectedly accepts the opt-in fork capability');
+    assert.equal(pluginManifestV1Schema.safeParse(optIn).success, false, 'Resolved shared schema unexpectedly accepts the opt-in fork capability');
   }
   const counters = [];
   for (const entry of new Set([sdkZod, sharedZod])) {
     const { z } = await import(pathToFileURL(entry).href);
-    counters.push({ entry: relative(root, entry), version: '3.25.76', results: await collectionCounters(z, 3) });
+    counters.push({ entry: relative(root, entry), version: expected.zod,
+      results: await collectionCounters(z, candidateRoot ? 0 : 3) });
   }
   return { root, worker, manifest, sdk, report: { plugin: source.name, node: process.versions.node,
     buildTarget: 'node22 (unchanged)', sourceEngine: source.engines.node, edges, counters,
     lockIntegrityFieldsComplete: edges.every(({ integrity }) => integrity !== null),
     manifestValidated: true, stockHostQualified: false, migrationQualified: false,
     candidate: { sdk: '2026.831.0', shared: '2026.831.0', zod: '4.6.7',
-      node22DropIn: false, requiredNode: '>=24.11.0', installed: false } } };
+      node22DropIn: false, requiredNode: '>=24.11.0', installed: Boolean(candidateRoot),
+      boundary: candidateRoot ? 'Byte-identical held build staged against isolated candidate runtime; no candidate typecheck or source migration'
+        : 'Held consumer baseline; candidate not installed in this consumer' } } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

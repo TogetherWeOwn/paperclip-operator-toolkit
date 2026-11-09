@@ -14,7 +14,7 @@ const policy = await readFile(join(candidate, '.npmrc'), 'utf8');
 const scratch = await mkdtemp(join(process.env.RUNNER_TEMP, 'sdk-native-policy-'));
 const hookNames = ['preinstall', 'install', 'postinstall', 'prepare'];
 const markers = hookNames.map((name) => `${name}.marker`);
-const markerScript = "require('node:fs').writeFileSync(process.argv[1], 'synthetic-hook')";
+const markerScript = "require('node:fs').writeFileSync(process.argv[2], 'synthetic-hook')";
 const scripts = Object.fromEntries(hookNames.map((name) => [name, `node marker.cjs ${name}.marker`]));
 const packages = new Map();
 for (const version of ['1.0.0', '2.0.0']) {
@@ -100,6 +100,7 @@ try {
   // must not be inferred to run, and candidate package scripts are never invoked.
   await npm(old, ['run', 'marker']);
   assert.equal(await readFile(join(old, 'explicit.marker'), 'utf8'), 'synthetic-hook');
+  assert.equal(await readFile(join(old, 'marker.cjs'), 'utf8'), markerScript, 'Marker command must not overwrite its own helper');
 
   const ranged = await project('fresh-range-filtered', '*');
   await npm(ranged, ['install', '--json']);

@@ -97,7 +97,9 @@ capability-denial behavior. Reports explicitly set `stockHostQualified` and
 
 The separate `sdk-candidate.yml` Actions workflow uses SDK/shared 2026.831.0 and
 Zod 4.6.7 in a private, script-free qualification root. Neither plugin's production
-manifest, lock or build/install steps change. Preparation passed in [run
+manifest, lock or held build/install steps change. Separate steps in each plugin
+suite also prepare a candidate install and stage only the already-built artifacts
+against it; the production consumer's node_modules tree remains untouched. Preparation passed in [run
 42601371360](https://github.com/TogetherWeOwn/paperclip-operator-toolkit/actions/runs/42601371360)
 at head `70af260adf83e3251714798167f804409fc5056d`. The checked-in candidate lock
 is byte-identical to its reviewed artifact, SHA-256
@@ -141,6 +143,41 @@ The **new clean-install/probe steps are prepared, not yet passing evidence**:
   `stockHostQualified: false` and `migrationQualified: false`. A synthetic import
   or counter pass is not either real plugin's compatibility, a stock scheduler,
   authorization/config result, complete containment or release approval.
+
+### Built-plugin candidate lane — prepared, not yet passing
+
+At head `efb3f7d642521b225a18b427cbba9574fd01ab5e`, [the native policy
+job](https://github.com/TogetherWeOwn/paperclip-operator-toolkit/actions/runs/42604290875/job/129116153603)
+failed before candidate installation: the authored marker helper used
+`process.argv[1]` (its own script path) instead of `process.argv[2]` (the marker
+filename). The fix also asserts that the helper stays unchanged. This was a
+fixture defect, not demonstrated native-policy failure. No candidate-install or
+probe pass is inherited from that run.
+
+Both plugin jobs now retain their held Node24/Node22 wire controls, then separately
+require native Node22 candidate refusal, Node24 artifact/lock preflight and native
+age/script enforcement before an isolated `npm ci --ignore-scripts`. The reviewed
+candidate root has no install/build hooks or script exemptions. The existing
+held installs/builds and their provenance limits are not silently strengthened by
+this separate lane.
+
+`built-candidate.mjs` stages byte-identical `dist/worker.js`, `dist/manifest.js`
+and `package.json` under the candidate root, records their SHA-256 hashes, and
+never copies source-consumer node_modules. `wire.mjs` then starts that real built
+worker, resolving its external SDK through its own staged location. Every ESM
+edge must land in the isolated candidate's reviewed three-package closure, never
+the held plugin's install or host. The actual shared manifest validator, tiny
+Zod4 counters, real worker handshakes, Insight job/tool/API controls and separate
+signal probe run against that candidate. A failed assertion, missing artifact,
+dead worker or timeout fails the job; no success report is written before wire
+completion. Each job uploads its own candidate provenance and results.
+
+This is a **runtime experiment on the held build**, not source compilation or
+typechecking against the candidate SDK. Copied manifests intentionally retain
+their held source pin and Node22 engine declaration as evidence, not as a false
+candidate support claim. Reports retain `migrationQualified: false` and
+`stockHostQualified: false`. It remains insufficient for stock authorization,
+config-route/scheduler qualification, source migration or operational adoption.
 
 ## Gates still open
 

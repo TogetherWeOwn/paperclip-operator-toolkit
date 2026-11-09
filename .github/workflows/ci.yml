@@ -5255,6 +5255,9 @@ jobs:
       - name: Qualify held SDK consumer and real worker wire on Node 24
         run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/wire.mjs .
 
+      - name: Retain npm11 for the isolated candidate engine negative control
+        run: printf 'NPM_CLI=%s\n' "$(readlink -f "$(command -v npm)")" >> "$GITHUB_ENV"
+
       # Exercise the advertised minimum with the SAME built worker/install, not
       # the host's SDK/Zod. This does not qualify a Node24-only SDK migration.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -5263,6 +5266,47 @@ jobs:
 
       - name: Qualify held SDK consumer and real worker wire on Node 22
         run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/wire.mjs .
+
+      - name: Require Node22 refusal of the isolated candidate
+        working-directory: verification/sdk-qualification
+        run: node engine-refusal.mjs candidate
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.2'
+
+      # The held source/install is not modified. Candidate packages have their
+      # own reviewed lock/policy; only byte-identical built artifacts are staged.
+      - name: Inventory candidate artifacts and verify the reviewed lock
+        working-directory: verification/sdk-qualification
+        run: |
+          node prepare-candidate.mjs inventory candidate
+          node prepare-candidate.mjs lock candidate
+
+      - name: Require native candidate age and script enforcement
+        working-directory: verification/sdk-qualification
+        run: node native-policy.mjs candidate
+
+      - name: Clean-install only the isolated candidate
+        working-directory: verification/sdk-qualification/candidate
+        run: npm ci --ignore-scripts
+
+      - name: Exercise the real built worker against the isolated candidate
+        run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/built-candidate.mjs . ../../verification/sdk-qualification/candidate
+
+      - name: Require unchanged held and candidate dependency sources
+        working-directory: .
+        run: git diff --exit-code -- plugins/cliproxy-insight/package.json plugins/cliproxy-insight/package-lock.json plugins/model-selection/package.json plugins/model-selection/package-lock.json verification/sdk-qualification/candidate/package.json verification/sdk-qualification/candidate/package-lock.json verification/sdk-qualification/candidate/.npmrc
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdk-built-candidate-${{ github.job }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            verification/sdk-qualification/candidate/inventory.json
+            verification/sdk-qualification/candidate/native-policy.json
+            verification/sdk-qualification/candidate/built-*.json
+          if-no-files-found: error
+          retention-days: 7
 
       # Every manifest-declared path must be in the distributable. A checksum
       # list that agrees with an incomplete archive cannot catch a missing
@@ -5330,6 +5374,9 @@ jobs:
       - name: Qualify held SDK consumer and real worker wire on Node 24
         run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/wire.mjs .
 
+      - name: Retain npm11 for the isolated candidate engine negative control
+        run: printf 'NPM_CLI=%s\n' "$(readlink -f "$(command -v npm)")" >> "$GITHUB_ENV"
+
       # Exercise the advertised minimum with the SAME built worker/install, not
       # the host's SDK/Zod. This does not qualify a Node24-only SDK migration.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -5338,6 +5385,47 @@ jobs:
 
       - name: Qualify held SDK consumer and real worker wire on Node 22
         run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/wire.mjs .
+
+      - name: Require Node22 refusal of the isolated candidate
+        working-directory: verification/sdk-qualification
+        run: node engine-refusal.mjs candidate
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.2'
+
+      # The held source/install is not modified. Candidate packages have their
+      # own reviewed lock/policy; only byte-identical built artifacts are staged.
+      - name: Inventory candidate artifacts and verify the reviewed lock
+        working-directory: verification/sdk-qualification
+        run: |
+          node prepare-candidate.mjs inventory candidate
+          node prepare-candidate.mjs lock candidate
+
+      - name: Require native candidate age and script enforcement
+        working-directory: verification/sdk-qualification
+        run: node native-policy.mjs candidate
+
+      - name: Clean-install only the isolated candidate
+        working-directory: verification/sdk-qualification/candidate
+        run: npm ci --ignore-scripts
+
+      - name: Exercise the real built worker against the isolated candidate
+        run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/built-candidate.mjs . ../../verification/sdk-qualification/candidate
+
+      - name: Require unchanged held and candidate dependency sources
+        working-directory: .
+        run: git diff --exit-code -- plugins/cliproxy-insight/package.json plugins/cliproxy-insight/package-lock.json plugins/model-selection/package.json plugins/model-selection/package-lock.json verification/sdk-qualification/candidate/package.json verification/sdk-qualification/candidate/package-lock.json verification/sdk-qualification/candidate/.npmrc
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdk-built-candidate-${{ github.job }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            verification/sdk-qualification/candidate/inventory.json
+            verification/sdk-qualification/candidate/native-policy.json
+            verification/sdk-qualification/candidate/built-*.json
+          if-no-files-found: error
+          retention-days: 7
 
   # The plugin tree is published; it carries no internal tracker IDs, hostnames,
   # private addresses or host-local paths. The self-test proves each pattern can

@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { inspectConsumer } from './consumer.mjs';
 import { workerBridge } from './worker-bridge.mjs';
 
-assert.equal(process.argv.length, 3, 'Usage: node --experimental-import-meta-resolve wire.mjs <plugin-root>');
-const consumer = await inspectConsumer(process.argv[2]);
+assert([3, 4].includes(process.argv.length), 'Usage: node --experimental-import-meta-resolve wire.mjs <plugin-root> [candidate-root]');
+const consumer = await inspectConsumer(process.argv[2], process.argv[3]);
 const { root, worker, manifest } = consumer;
 const COMPANY = '11111111-1111-4111-8111-111111111111';
 const OTHER = '22222222-2222-4222-8222-222222222222';
@@ -175,7 +175,7 @@ const signalBridge = workerBridge(signalWorker, root, async ({ method, params },
   assert.deepEqual(params, {
     url: 'https://fixture.invalid/signal',
     init: { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'tiny-signal-control' },
-  }, 'Held SDK must serialize the supported fields and omit AbortSignal');
+  }, 'Consumer SDK must serialize the supported fields and omit AbortSignal');
   signalCalls.push(method);
   reply({ status: 200, statusText: 'OK', headers: {}, body: 'inert-host-response' });
 }, [signalWorker, consumer.sdk]);
