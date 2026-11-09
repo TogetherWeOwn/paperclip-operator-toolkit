@@ -5,6 +5,8 @@ import { createHash } from 'node:crypto';
 import { access, mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { inspectConsumer } from './consumer.mjs';
+import { checkConfigRoutes } from './stock-config.mjs';
+import { validateStockPackage } from './stock-package.mjs';
 import { STOCK_SOURCE, STOCK_IMAGE, STOCK_RELEASE, assertEmptyUsage, partialStockReport, scheduledCompletion } from './stock-contract.mjs';
 
 const candidate = '/qualification/candidate';
@@ -128,7 +130,8 @@ try {
   // neither an image tag nor host Zod is used as the candidate's identity.
   const consumers = [];
   for (const name of ['cliproxy-insight', 'model-selection']) {
-    const consumer = await inspectConsumer(join(candidate, 'consumers', name), candidate);
+    const consumer = await inspectConsumer(join(candidate, 'consumers', `stock-${name}`), candidate);
+    await validateStockPackage(consumer.root, consumer.manifest);
     consumers.push(consumer);
   }
   report.consumers = consumers.map(consumer => consumer.report);
@@ -164,17 +167,8 @@ try {
   const saved = await api(`${pluginPath}/config`, { companyId: company.id, configJson: config });
   assert.deepEqual(saved.configJson, config);
   const configPath = `${pluginPath}/config?companyId=${company.id}`;
-  const before = await api(configPath);
-  assert.deepEqual(before.configJson, config);
-  for (const route of ['/config', '/config/test']) {
-    await api(`${pluginPath}${route}`, { configJson: config }, 400);
-    await api(`${pluginPath}${route}`, { companyId: company.id, configJson: [] }, 400);
-    const invalid = await api(`${pluginPath}${route}`, { companyId: company.id, configJson: { pollingEnabled: 'yes' } }, 400);
-    assert(Array.isArray(invalid.fieldErrors) && invalid.fieldErrors.length > 0, 'Missing actual Ajv diagnostics');
-  }
-  const tested = await api(`${pluginPath}/config/test`, { companyId: company.id, configJson: config });
-  assert.equal(tested.valid, true);
-  assert.deepEqual((await api(configPath)).configJson, before.configJson, 'Rejected/test configs persisted a change');
+  assert.deepEqual((await api(configPath)).configJson, config);
+  await checkConfigRoutes(api, pluginPath, company.id, config);
   const usagePath = `${pluginPath}/api/usage-summary`;
   const usage = await api(`${usagePath}?companyId=${company.id}`);
   assertEmptyUsage(usage);

@@ -44,9 +44,13 @@ export function workerBridge(worker, cwd, service, args = [worker]) {
       } else {
         const entry = pending.get(message.id);
         assert(entry, 'Unexpected or duplicate worker response');
+        if (message.error) {
+          assert(Number.isInteger(message.error.code), 'Missing JSON-RPC error code');
+          assert.equal(typeof message.error.message, 'string');
+        }
         clearTimeout(entry.timer);
         pending.delete(message.id);
-        if (message.error) entry.reject(Object.assign(new Error(message.error.message), { code: message.error.code }));
+        if (message.error) entry.reject(Object.assign(new Error(message.error.message), { name: 'WorkerRpcError', code: message.error.code }));
         else entry.resolve(message.result);
       }
     })().catch(fail);
@@ -57,8 +61,7 @@ export function workerBridge(worker, cwd, service, args = [worker]) {
       return new Promise((resolve, reject) => {
         const id = `fixture-${++sequence}`;
         const timer = setTimeout(() => {
-          pending.delete(id);
-          reject(new Error(`Worker RPC timed out: ${method}; ${stderr}`));
+          fail(Object.assign(new Error(`Worker RPC timed out: ${method}; ${stderr}`), { code: 'SDK_FIXTURE_RPC_TIMEOUT' }));
         }, timeoutMs);
         pending.set(id, { resolve, reject, timer });
         send({ jsonrpc: '2.0', id, method, params });

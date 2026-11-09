@@ -286,10 +286,27 @@ mandatory in the future lifecycle; the driver must never run against a managed
 instance or serve as a standalone deployment instruction.
 
 No workflow invokes the driver, pulls its image or installs stock packages.
-`stock-source-controls` runs only its syntax check and first-party receipt-unit
-controls in Actions, with no dependency install. These source checks are prepared,
-not passing runtime evidence. The existing age/install/Security holds must clear
-before a separately reviewed lifecycle may execute anything stock-related.
+`stock-source-controls` runs its syntax check and first-party bridge, config-oracle,
+package-completeness, toolchain and receipt-unit controls in Actions, with no dependency
+install. These controls do not execute stock callers. The existing age/install/Security
+holds must clear before a separately reviewed lifecycle may execute anything stock-related.
+
+The runtime-only wire consumer is not a stock-install package. After its wire check,
+`built-candidate.mjs` prepares a separate `candidate/consumers/stock-<plugin>` tree.
+`stock-package.mjs` reuses the existing model-selection `requiredPaths` and
+`checkCompleteness` contract, copies each declared regular file/directory with byte
+hashes (including `migrations/README.md`), and checks completeness again. The disabled
+driver accepts only these complete trees and repeats validation before installation.
+Staging is first-party source preparation, not stock execution or an install permission.
+
+Config oracle controls use a distinct valid polling-disabled test value and compare
+persisted configuration immediately after every rejected request and the valid test.
+Synthetic regression controls deliberately persist rejected/test input and require
+oracle failure; they are not passing host config-save/test evidence. Bridge deadline
+expiry poisons health and pending requests, while refusal controls require structured
+worker errors. The intentional plugin HTTP timeout remains a successful RPC plus
+metrics/deferred-reply control, never a bridge deadline. Both plugin jobs retain npm
+from pinned Node24.22.2 before switching to Node22; the exact npm11 assertion remains.
 
 ### Exact remaining fixture prerequisite
 

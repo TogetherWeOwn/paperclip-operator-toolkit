@@ -105,7 +105,9 @@ await scenario('initialize-and-unknown-method', async ({ bridge, initialized, ca
     assert(!initialized.supportedMethods.includes(method));
     await assert.rejects(bridge.request(method, { companyId: COMPANY }), { code: -32601 });
   }
-  await assert.rejects(bridge.request('runJob', { job: { jobKey: 'not-declared' } }));
+  await assert.rejects(bridge.request('runJob', { job: { jobKey: 'not-declared' } }), {
+    name: 'WorkerRpcError', message: /No handler registered for job "not-declared"/,
+  });
   assert.equal(calls.length, before, 'Unknown dispatch must not call fixture services');
 });
 
@@ -142,7 +144,9 @@ if (manifest.id.includes('cliproxy-insight')) {
   });
   await scenario('identical-second-company-latches-poll-off', async ({ bridge, calls }) => {
     await bridge.request('configChanged', { config, companyId: COMPANY });
-    await assert.rejects(bridge.request('configChanged', { config, companyId: OTHER }));
+    await assert.rejects(bridge.request('configChanged', { config, companyId: OTHER }), {
+      name: 'WorkerRpcError', message: /requires exactly one configured company; polling stopped/,
+    });
     await bridge.request('runJob', job);
     assert(metric(calls, 'poll_skipped_company_scope'));
     assert.equal(effects(calls).length, 0);

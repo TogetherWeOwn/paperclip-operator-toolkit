@@ -33,8 +33,8 @@ jobs:
       # the separate age/install/Security holds are not cleared by this job.
       - name: Check prepared stock driver syntax without executing it
         run: node --check verification/sdk-qualification/stock-driver.mjs
-      - name: Refuse manual, historical and incomplete scheduling receipts
-        run: node --test verification/sdk-qualification/stock-contract.test.mjs
+      - name: Check fixture refusal, persistence, package and scheduling oracles
+        run: node --test verification/sdk-qualification/worker-bridge.test.mjs verification/sdk-qualification/stock-config.test.mjs verification/sdk-qualification/stock-package.test.mjs verification/sdk-qualification/stock-contract.test.mjs verification/sdk-qualification/toolchain.test.mjs
 
   prepare-lock:
     runs-on: ubuntu-latest

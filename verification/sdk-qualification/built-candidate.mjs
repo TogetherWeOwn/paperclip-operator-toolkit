@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { access, lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { stageStockPackage } from './stock-package.mjs';
 
 assert.equal(process.argv.length, 4, 'Usage: built-candidate.mjs <built-plugin-root> <installed-candidate-root>');
 const source = await realpath(process.argv[2]);
@@ -39,6 +40,10 @@ const wireReport = JSON.parse(output);
 assert.equal(wireReport.candidate.installed, true);
 assert.equal(wireReport.stockHostQualified, false);
 assert.equal(wireReport.migrationQualified, false);
-const report = { artifacts, ...wireReport };
+// Keep the deliberately runtime-only wire consumer separate from the package
+// that a future authorized stock lifecycle may install. No stock code is run.
+const manifest = (await import(pathToFileURL(join(destination, 'dist/manifest.js')).href)).default;
+const stockPackage = await stageStockPackage(source, join(candidate, 'consumers', `stock-${name}`), manifest);
+const report = { artifacts, stockPackage, ...wireReport };
 await writeFile(join(candidate, `built-${name}.json`), `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify(report, null, 2));

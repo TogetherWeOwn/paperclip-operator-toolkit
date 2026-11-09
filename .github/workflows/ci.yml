@@ -5220,10 +5220,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # Node 24: the version the instance runs plugins on.
+      # Pin the distribution that supplies the retained npm11 negative control.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '24'
+          node-version: '24.22.2'
           cache: npm
           cache-dependency-path: plugins/model-selection/package-lock.json
 
@@ -5353,7 +5353,7 @@ jobs:
       # Node 24: the version the instance runs plugins on.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '24'
+          node-version: '24.22.2'
           cache: npm
           cache-dependency-path: plugins/cliproxy-insight/package-lock.json
 
