@@ -16,7 +16,7 @@ SIBLING = "test_request_record_integrity.sh"
 
 
 class MutationDiagnostics(unittest.TestCase):
-    def run_gate(self, *, expected="no", owner=1, sibling=0, baseline=0):
+    def run_gate(self, *, expected="no", owner=1, sibling=0, baseline=0, owner_baseline=0):
         workflow = WORKFLOW.read_text()
         start = workflow.index("          mutation_suite() {")
         end = workflow.index("\n          rc=0", start)
@@ -39,7 +39,7 @@ class MutationDiagnostics(unittest.TestCase):
                 print(role + '-' + phase + '-stdout')
                 print('x' * 20000, flush=True)
                 print(role + '-' + phase + '-stderr', file=sys.stderr)
-                key = role + '_RC' if mutated else ('BASELINE_RC' if role == 'SIBLING' else '0')
+                key = role + ('_RC' if mutated else '_BASELINE_RC')
                 sys.exit(int(os.environ.get(key, '0')))
             '''))
             script = functions + textwrap.dedent('''\
@@ -51,7 +51,8 @@ class MutationDiagnostics(unittest.TestCase):
                 ["bash", "-u", "-o", "pipefail", "-c", script], cwd=source,
                 env={**os.environ, "SOURCE": str(source), "RUNNER_TEMP": temp,
                      "EXPECTED": expected, "OWNER_RC": str(owner),
-                     "SIBLING_RC": str(sibling), "BASELINE_RC": str(baseline),
+                     "SIBLING_RC": str(sibling), "SIBLING_BASELINE_RC": str(baseline),
+                     "OWNER_BASELINE_RC": str(owner_baseline),
                      "BASH_ENV": "/dev/null"},
                 capture_output=True, text=True, timeout=15,
             )
@@ -63,36 +64,56 @@ class MutationDiagnostics(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(saved)
 
+    def assert_diagnostic(self, result, saved, phase, role, code):
+        suite = OWNER if role == "OWNER" else SIBLING
+        self.assertIn(
+            f"::group::banked-stale-authority {phase}: {suite} (rc={code})\n",
+            result.stdout,
+        )
+        transcript = saved[f"banked-stale-authority-{phase}.log"]
+        stream_phase = "baseline" if phase.endswith("baseline") else "mutant"
+        self.assertIn(f"{role}-{stream_phase}-stdout", transcript)
+        self.assertIn(f"{role}-{stream_phase}-stderr", transcript)
+        self.assertIn("x" * 20000, transcript)
+
     def test_unexpected_sibling_preserves_both_transcripts(self):
         result, saved = self.run_gate(sibling=1)
         self.assertEqual(result.returncode, 1)
-        for phase, role in (("owner", "OWNER"), ("sibling", "SIBLING")):
-            transcript = saved[f"banked-stale-authority-{phase}.log"]
-            self.assertIn(f"{role}-mutant-stdout", transcript)
-            self.assertIn(f"{role}-mutant-stderr", transcript)
-            self.assertIn("x" * 20000, transcript)
-        self.assertIn("expected detection=no", result.stdout)
+        self.assertEqual(set(saved), {"banked-stale-authority-owner.log",
+                                      "banked-stale-authority-sibling.log"})
+        self.assert_diagnostic(result, saved, "owner", "OWNER", 1)
+        self.assert_diagnostic(result, saved, "sibling", "SIBLING", 1)
         self.assertLess(len(result.stdout), 34000)
         self.assertIn("SIBLING-mutant-stderr", result.stdout)
 
     def test_baseline_failure_is_not_mutant_detection(self):
         result, saved = self.run_gate(baseline=7)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("no mutation attribution", result.stdout)
-        self.assertIn("rc=7", result.stdout)
-        self.assertIn("SIBLING-baseline-stderr", saved["banked-stale-authority-sibling-baseline.log"])
+        self.assertEqual(set(saved), {"banked-stale-authority-sibling-baseline.log"})
+        self.assert_diagnostic(result, saved, "sibling-baseline", "SIBLING", 7)
         self.assertNotIn("OWNER-mutant", result.stdout)
+
+    def test_owner_baseline_failure_is_preserved(self):
+        result, saved = self.run_gate(owner_baseline=7)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(set(saved), {"banked-stale-authority-owner-baseline.log"})
+        self.assert_diagnostic(result, saved, "owner-baseline", "OWNER", 7)
+        self.assertNotIn("OWNER-mutant", result.stdout)
+        self.assertNotIn("SIBLING-", result.stdout)
 
     def test_unexpected_owner_pass_is_preserved(self):
         result, saved = self.run_gate(owner=0)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("OWNER-mutant-stderr", saved["banked-stale-authority-owner.log"])
+        self.assertEqual(set(saved), {"banked-stale-authority-owner.log"})
+        self.assert_diagnostic(result, saved, "owner", "OWNER", 0)
 
     def test_yes_expectation_still_requires_detection(self):
         result, saved = self.run_gate(expected="yes", sibling=0)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("expected detection=yes", result.stdout)
-        self.assertEqual(len(saved), 2)
+        self.assertEqual(set(saved), {"banked-stale-authority-owner.log",
+                                      "banked-stale-authority-sibling.log"})
+        self.assert_diagnostic(result, saved, "owner", "OWNER", 1)
+        self.assert_diagnostic(result, saved, "sibling", "SIBLING", 0)
         result, saved = self.run_gate(expected="yes", sibling=1)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(saved)
@@ -102,9 +123,10 @@ class MutationDiagnostics(unittest.TestCase):
             with self.subTest(code=code):
                 result, saved = self.run_gate(expected="yes", sibling=code)
                 self.assertEqual(result.returncode, 1)
-                self.assertIn("OUTER deadline", result.stdout)
-                self.assertIn(f"rc={code}", result.stdout)
-                self.assertEqual(len(saved), 2)
+                self.assertEqual(set(saved), {"banked-stale-authority-owner.log",
+                                              "banked-stale-authority-sibling.log"})
+                self.assert_diagnostic(result, saved, "owner", "OWNER", 1)
+                self.assert_diagnostic(result, saved, "sibling", "SIBLING", code)
 
 
 if __name__ == "__main__":
