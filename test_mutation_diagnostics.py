@@ -37,7 +37,7 @@ class MutationDiagnostics(unittest.TestCase):
                 role = 'OWNER' if sys.argv[2] == 'test_responsible_leader.sh' else 'SIBLING'
                 phase = 'mutant' if mutated else 'baseline'
                 print(role + '-' + phase + '-stdout')
-                print('x' * 20000)
+                print('x' * 20000, flush=True)
                 print(role + '-' + phase + '-stderr', file=sys.stderr)
                 key = role + '_RC' if mutated else ('BASELINE_RC' if role == 'SIBLING' else '0')
                 sys.exit(int(os.environ.get(key, '0')))
