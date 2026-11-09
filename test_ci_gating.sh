@@ -152,14 +152,18 @@ mutate ciok-blind-to-scan '      - disclosure-scan
       - model-selection-impact
       - model-selection-mutants
       - model-selection-suite
+      - plugin-toolchain-qualification
     steps:
       - name: Aggregate gated results' '      - disclosure-scan
       - model-selection-impact
       - model-selection-mutants
       - model-selection-suite
+      - plugin-toolchain-qualification
     steps:
       - name: Aggregate gated results'
 expect_fail ciok-blind-to-scan "$MUTANT_FILE"
+mutate ciok-blind-to-toolchain '      - plugin-toolchain-qualification' '      # toolchain qualification dependency removed'
+expect_fail ciok-blind-to-toolchain "$MUTANT_FILE"
 # sdlc_foundation step deleted (its header comment kept): the suite cannot
 # guard its own presence, so this independent gate must go red.
 mutate sdlc-step-deleted '          ./test_sdlc_foundation_placement.sh

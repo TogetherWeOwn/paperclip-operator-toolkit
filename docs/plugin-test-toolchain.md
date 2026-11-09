@@ -8,7 +8,7 @@ Both model-selection and CLIProxy Insight use exact dev-toolchain pins:
 | --- | --- | --- |
 | Vitest and all seven `@vitest/*` packages | 4.1.12 | Covers the UI-server advisory and both newer mocker advisories. |
 | Vite | 6.4.5 | Smallest supported major with fixes for the original eight advisories **and** the 6.4.4 backport regression. |
-| esbuild and its optional platform packages | 0.25.0 | Covers the cross-origin development-server advisory; replaces both original esbuild versions. |
+| esbuild and its optional platform packages | 0.25.1 | Covers the cross-origin development-server advisory; replaces both original esbuild versions. |
 | Tinypool (CLIProxy Insight standalone regression) | 2.1.2 | Preserves the existing reviewed security pin and regression. |
 
 Vitest 3.2.6 is insufficient: [GHSA-82fw-gwwq-j7x9](https://github.com/advisories/GHSA-82fw-gwwq-j7x9)
@@ -29,7 +29,13 @@ But [GHSA-8g5g-mxqh-grgj](https://github.com/advisories/GHSA-8g5g-mxqh-grgj)
 affects **exactly 6.4.4**, so that candidate was rejected after lock-only audit.
 The corrected pin is 6.4.5.
 
-esbuild 0.25.0 covers [GHSA-67mh-4wv8-2f99](https://github.com/advisories/GHSA-67mh-4wv8-2f99).
+esbuild 0.25.1 covers [GHSA-67mh-4wv8-2f99](https://github.com/advisories/GHSA-67mh-4wv8-2f99).
+The advisory minimum is 0.25.0, but its Android ARM artifact's immutable
+registry SHA-512 contains a substring matched by the repository's disclosure
+scanner. The initial Actions run rejected that lockfile. Rather than weakening
+the scanner, omitting a platform, or altering/obfuscating integrity, use the next
+patch 0.25.1 and qualify it normally. This is the smallest candidate satisfying
+the existing disclosure contract; it is not a claim that 0.25.0 is unpatched.
 Tinypool 2.1.2 covers both
 [GHSA-5gmw-xhrv-c9v3](https://github.com/advisories/GHSA-5gmw-xhrv-c9v3) and
 [GHSA-85c8-ppgw-ccpr](https://github.com/advisories/GHSA-85c8-ppgw-ccpr).
@@ -50,7 +56,7 @@ The reviewed version-change/addition allowlist is:
 
 - `vitest`, `@vitest/expect`, `@vitest/mocker`, `@vitest/pretty-format`,
   `@vitest/runner`, `@vitest/snapshot`, `@vitest/spy`, `@vitest/utils`: 4.1.12.
-- `vite`: 6.4.5; `esbuild` and every `@esbuild/*` optional platform package: 0.25.0.
+- `vite`: 6.4.5; `esbuild` and every `@esbuild/*` optional platform package: 0.25.1.
 - Vitest's new dependency edges: `@standard-schema/spec` 1.1.0,
   `@types/chai` 5.2.3, `@types/deep-eql` 4.0.2, `chai` 6.3.0,
   `convert-source-map` 2.0.0, `es-module-lexer` 2.3.2, `obug` 2.2.1,
@@ -72,7 +78,7 @@ SDK/shared 2026.824.1 and transitive Zod. Unrelated exact edges such as Rollup's
 and fast-uri patches are separate source work, not duplicated by this migration.
 
 Neither root has install/prepare/pack hooks. The new lock's install-hook
-candidates are esbuild 0.25.0 (`node install.js`) and unchanged optional macOS
+candidates are esbuild 0.25.1 (`node install.js`) and unchanged optional macOS
 fsevents 2.3.3. esbuild's reviewed installer can invoke npm or fetch a platform
 binary: it remains **disabled**, using the packaged optional platform binary
 instead. tinyexec declares `prepare: npm run build`; registry installation uses
@@ -103,8 +109,8 @@ CI-only refusal, two-worker default, cache refusal, per-run timeout/output bound
 isolated baseline and completed-summary checks. Runner errors are not mutant
 kills.
 
-GitHub Actions is the qualification authority. The reusable
-`plugin-toolchain.yml` workflow is part of the required `ci-ok` dependency graph:
+GitHub Actions is the qualification authority. The
+`plugin-toolchain-qualification` job is part of the required `ci-ok` dependency graph:
 
 - Node 22 and 24, both plugins: script-free clean install, observed fork/thread
   pool selection and concurrent worker bound, typecheck, full suite, build.

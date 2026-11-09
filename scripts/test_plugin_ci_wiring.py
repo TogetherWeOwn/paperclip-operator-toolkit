@@ -33,10 +33,10 @@ class PluginWiring(unittest.TestCase):
         block = job(self.text, "plugin-toolchain-qualification")
         self.assertIn("needs: [changes]", block)
         self.assertIn("if: needs.changes.outputs.heavy == 'true'", block)
-        self.assertIn("uses: ./.github/workflows/plugin-toolchain.yml", block)
+        self.assertIn("timeout-minutes: 30", block)
         self.assertIn("      - plugin-toolchain-qualification\n", job(self.text, "ci-ok"))
-        qualification = WORKFLOW.with_name("plugin-toolchain.yml").read_text()
-        for required in ("workflow_call:", "node: ['22', '24']",
+        qualification = block
+        for required in ("node: ['22', '24']",
                          "plugin: [model-selection, cliproxy-insight]",
                          "npm ci --include=dev --ignore-scripts", "qualify-vitest-pools.mjs",
                          "npm test -- --pool=forks --maxWorkers=2",
