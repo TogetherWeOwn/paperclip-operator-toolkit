@@ -93,42 +93,61 @@ The fixture supplies the `runJob` call itself and cannot prove scheduler or
 capability-denial behavior. Reports explicitly set `stockHostQualified` and
 `migrationQualified` to false.
 
-## Isolated candidate lock preparation — no installation
+## Isolated candidate lane — not a plugin migration
 
-The separate `sdk-candidate.yml` Actions workflow prepares an **unapproved lock
-artifact** for SDK/shared 2026.831.0 and Zod 4.6.7. It does not change either
-plugin's production manifest, lock or build/install steps. `candidate/package.json`
-is a private, script-free qualification root, not a release-selected migration.
+The separate `sdk-candidate.yml` Actions workflow uses SDK/shared 2026.831.0 and
+Zod 4.6.7 in a private, script-free qualification root. Neither plugin's production
+manifest, lock or build/install steps change. Preparation passed in [run
+42601371360](https://github.com/TogetherWeOwn/paperclip-operator-toolkit/actions/runs/42601371360)
+at head `70af260adf83e3251714798167f804409fc5056d`. The checked-in candidate lock
+is byte-identical to its reviewed artifact, SHA-256
+`98a19aece777ef6f5e9ee00f006927da3c3be77cb22934ee9d3077927bd5722b`.
+The old artifact's name used GitHub's synthetic merge SHA, not the PR head; the run
+API identifies the head above. New artifacts explicitly use the PR head SHA.
+
+The **new clean-install/probe steps are prepared, not yet passing evidence**:
 
 - Node 24.22.2 supplies npm 11.19.1; a different npm version fails closed, with no
-  toolchain upgrade. The fixture requires effective native `min-release-age=3`,
-  `ignore-scripts=true`, `engine-strict=true`, optional omission and no age
-  exemptions. Configuration/version checks are **not native enforcement probes**.
-- Before resolution, `prepare-candidate.mjs` reads exact registry records and
-  SHA-512-verifies tarballs. Each download uses a fresh runner-temp directory.
-  Only `package/package.json` is read to stdout, without extraction or import.
-  It compares relevant registry/tarball metadata, inventories all scripts and
-  refuses install/prepare/pack hooks, unexpected dependencies and nonoptional
-  peers. Metadata timestamps are an additional check, not a replacement for npm's
-  age policy. Registry responses, archive reads and job duration are bounded.
-- Native `npm install --package-lock-only --ignore-scripts` resolves a lock;
-  **no candidate node_modules may exist before or after it**. The verifier requires
-  precisely the three expected package records, no nested/extra copies, matching
-  registry SHA-512 and tarball URL, matching engines/dependencies and no install
-  scripts. No candidate code or counter/worker fixture runs in this job.
-- The SHA-named artifact contains the root manifest, generated lock and metadata
-  inventory. It requires review before a separate clean install. The later lane
-  must first demonstrate native age/script enforcement with harmless controls,
-  check Node22 engine refusal, clean-install the accepted lock and exercise the
-  candidate against real consumer artifacts. A green **preparation** job is not a
-  clean-install, build, compatibility or containment pass.
+  toolchain upgrade. Effective native policy is `min-release-age=3`,
+  `ignore-scripts=true`, `engine-strict=true`, optional omission, no exemptions.
+- Before installing anything, `prepare-candidate.mjs` reads registry records and
+  SHA-512-verifies tarballs as inert data. Downloads have fresh runner-temp
+  directories. Only `package/package.json` is read to stdout, without extraction
+  or import. Relevant metadata must match, with no install/prepare/pack hooks,
+  unexpected dependencies or mandatory peers. Responses and archive reads are
+  bounded. The accepted lock must contain precisely the three reviewed packages,
+  matching URLs/integrities, engines and dependency closure; no node_modules may
+  exist at this preflight boundary. Existing locks do not retrospectively prove
+  publication age; the independent metadata age check remains required.
+- `native-policy.mjs` supplies a loopback-only first-party registry with a tiny
+  ten-day-old and one-hour-old synthetic release. Native npm must install the old
+  release, select it over a fresh latest release and refuse an exact fresh pin
+  without fetching its tarball. Root/dependency marker hooks must not run under
+  the candidate's policy. A named command must still run. A separate synthetic
+  root enables only these authored marker hooks as a differential positive
+  control; the real candidate's settings never change and has no exceptions.
+  This is a native-manager test, not a replacement installer or registry policy.
+- Under Node22, the same retained npm11 CLI must refuse `npm ci` with EBADENGINE,
+  without materializing node_modules or changing the lock. This is a negative
+  engine control, not a claim that all supported consumers have moved to Node24.
+- Only after all preceding controls pass does Node24 run native `npm ci
+  --ignore-scripts` in the isolated candidate root. `candidate-contract.mjs`
+  follows synthetic-consumer → SDK → shared/Zod ESM edges inside that install,
+  imports published JavaScript exports and runs the tiny sync/async counters
+  with a zero-visit bounded-overflow expectation. Unbounded arrays must still
+  traverse three elements. No downloaded build command or hook is required/run.
+- The source/lock must remain unchanged. The artifact records inventory, native
+  controls and synthetic candidate report, explicitly retaining
+  `stockHostQualified: false` and `migrationQualified: false`. A synthetic import
+  or counter pass is not either real plugin's compatibility, a stock scheduler,
+  authorization/config result, complete containment or release approval.
 
 ## Gates still open
 
 - Minimal v4-native SDK/shared 2026.831.0 with Zod 4.6.7 is qualification-only,
   not release-selected. Both packages require Node >=24.11.0 and are **not a
-  Node22 drop-in**. Review the prepared candidate lock/inventory and run native
-  enforcement probes before any clean candidate installation. Existing plugin
+  Node22 drop-in**. The lock review permits only the isolated Actions candidate
+  lane after its native probes pass, not a source-pin change. Existing plugin
   install and build steps are unchanged.
 - The observed installed-versus-registry metadata differences for 2026.1106.0
   are unresolved. That pair must not be installed before its native age gate;
