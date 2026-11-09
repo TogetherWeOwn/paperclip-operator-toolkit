@@ -1,0 +1,51 @@
+name: SDK candidate lock preparation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/sdk-candidate.yml'
+      - 'verification/sdk-qualification/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sdk-candidate.yml'
+      - 'verification/sdk-qualification/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-candidate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.2'
+      # This Node distribution supplies npm 11.19.1. Refuse any other version
+      # rather than upgrading tools or silently losing native release-age policy.
+      - name: Inventory exact published artifacts without importing them
+        run: node verification/sdk-qualification/prepare-candidate.mjs inventory verification/sdk-qualification/candidate
+      - name: Resolve candidate lock only with native policy
+        working-directory: verification/sdk-qualification/candidate
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Require reviewed closure and matching artifact identities
+        run: node verification/sdk-qualification/prepare-candidate.mjs lock verification/sdk-qualification/candidate
+      # No npm ci or downloaded module execution: review this lock and inventory
+      # first. A later clean install still requires native enforcement probes.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdk-candidate-lock-${{ github.sha }}
+          path: |
+            verification/sdk-qualification/candidate/package.json
+            verification/sdk-qualification/candidate/package-lock.json
+            verification/sdk-qualification/candidate/inventory.json
+          if-no-files-found: error
+          retention-days: 7

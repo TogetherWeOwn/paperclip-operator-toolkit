@@ -1,0 +1,14 @@
+{
+  "name": "sdk-qualification-candidate",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.11.0" },
+  "packageManager": "npm@11.19.1",
+  "scripts": {},
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "2026.831.0",
+    "@paperclipai/shared": "2026.831.0",
+    "zod": "4.6.7"
+  }
+}

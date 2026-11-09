@@ -93,14 +93,43 @@ The fixture supplies the `runJob` call itself and cannot prove scheduler or
 capability-denial behavior. Reports explicitly set `stockHostQualified` and
 `migrationQualified` to false.
 
+## Isolated candidate lock preparation — no installation
+
+The separate `sdk-candidate.yml` Actions workflow prepares an **unapproved lock
+artifact** for SDK/shared 2026.831.0 and Zod 4.6.7. It does not change either
+plugin's production manifest, lock or build/install steps. `candidate/package.json`
+is a private, script-free qualification root, not a release-selected migration.
+
+- Node 24.22.2 supplies npm 11.19.1; a different npm version fails closed, with no
+  toolchain upgrade. The fixture requires effective native `min-release-age=3`,
+  `ignore-scripts=true`, `engine-strict=true`, optional omission and no age
+  exemptions. Configuration/version checks are **not native enforcement probes**.
+- Before resolution, `prepare-candidate.mjs` reads exact registry records and
+  SHA-512-verifies tarballs. Each download uses a fresh runner-temp directory.
+  Only `package/package.json` is read to stdout, without extraction or import.
+  It compares relevant registry/tarball metadata, inventories all scripts and
+  refuses install/prepare/pack hooks, unexpected dependencies and nonoptional
+  peers. Metadata timestamps are an additional check, not a replacement for npm's
+  age policy. Registry responses, archive reads and job duration are bounded.
+- Native `npm install --package-lock-only --ignore-scripts` resolves a lock;
+  **no candidate node_modules may exist before or after it**. The verifier requires
+  precisely the three expected package records, no nested/extra copies, matching
+  registry SHA-512 and tarball URL, matching engines/dependencies and no install
+  scripts. No candidate code or counter/worker fixture runs in this job.
+- The SHA-named artifact contains the root manifest, generated lock and metadata
+  inventory. It requires review before a separate clean install. The later lane
+  must first demonstrate native age/script enforcement with harmless controls,
+  check Node22 engine refusal, clean-install the accepted lock and exercise the
+  candidate against real consumer artifacts. A green **preparation** job is not a
+  clean-install, build, compatibility or containment pass.
+
 ## Gates still open
 
 - Minimal v4-native SDK/shared 2026.831.0 with Zod 4.6.7 is qualification-only,
   not release-selected. Both packages require Node >=24.11.0 and are **not a
-  Node22 drop-in**. Before candidate installation, retain native three-day
-  release-age and script controls, review the isolated candidate lock and
-  install-hook inventory, and compare all held copies. Existing install and
-  build steps are unchanged by this fixture.
+  Node22 drop-in**. Review the prepared candidate lock/inventory and run native
+  enforcement probes before any clean candidate installation. Existing plugin
+  install and build steps are unchanged.
 - The observed installed-versus-registry metadata differences for 2026.1106.0
   are unresolved. That pair must not be installed before its native age gate;
   a matching version label is not artifact equivalence.
