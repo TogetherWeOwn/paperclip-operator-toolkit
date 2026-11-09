@@ -200,6 +200,52 @@ candidate support claim. Reports retain `migrationQualified: false` and
 `stockHostQualified: false`. It remains insufficient for stock authorization,
 config-route/scheduler qualification, source migration or operational adoption.
 
+### Candidate production-source typecheck and rebuild — prepared, not passed
+
+`source-candidate.mjs` adds a separate experiment after the existing candidate
+runtime controls. It copies regular files from `src`, the package manifest,
+TypeScript config and first-party build script byte-for-byte to a fresh consumer
+under the isolated candidate. It never copies or symlinks held node_modules or
+rewrites source pins/engines. This is not the earlier held-build experiment.
+
+The existing held development install supplies TypeScript, Node declarations and
+esbuild, without a new tool install or a stronger provenance claim for those tools.
+The TypeScript API preserves production compiler options (including `skipLibCheck`),
+changes the include to **production `src` only**, and explicitly locates the held
+Node type declarations. Test-runner types and test files are excluded, so this is
+not a full plugin/test typecheck. There are no SDK path aliases. The compiler must
+resolve the SDK entry and load SDK/shared/Zod declarations only from the reviewed
+candidate closure; the report records those files and versions. Empty input,
+diagnostics or held SDK declarations fail. A deliberately incorrect virtual source
+must produce TS2322, proving that the checker is active.
+
+After the positive check, the original first-party esbuild script runs with an
+empty environment and the staged source as cwd. Its unchanged node22 syntax target
+is **not** a candidate engine-compatibility claim. The newly rebuilt artifacts are
+hashed and run through the same consumer/schema/counter/real-wire controls against
+the candidate. Input bytes must stay unchanged. A JSON report is uploaded even on
+a failed typecheck/build/wire step, retaining incomplete flags and diagnostics;
+nonzero remains a failed job, never a compatibility pass. No such source result
+has passed Actions yet. Production source engines/pins, release selection and
+stock/migration qualification remain unchanged.
+
+## Technical target disposition
+
+The current technical disposition retains the advertised **Node >=22** floor,
+node22 build targets and held SDK/shared pins. Node24 CI or one observed Node24
+host is not authority to retire that support contract. A Node24-only migration
+needs a durable support-scope record naming the covered consumers, exact host and
+runtime identities, treatment of Node22 consumers, release boundary and rollback
+obligations. Candidate experiments do not supply that decision.
+
+The additional selected disposable stock target is Linux AMD64 image
+`ghcr.io/paperclipai/paperclip@sha256:12ae7579165cbf11d8db71ef69cf01ff48660383e78541b6b2eba38939fa30c9`,
+associated source `d69631b01b9c658f80bf8bed389863dce82643e1`, expected release
+2026.1106.0. Image/source/npm/runtime/candidate identities remain separate. The
+selection is preparation only, not permission to install the image early, a passed
+stock lifecycle or any release verdict. The 1106 age/install and Security holds
+still apply. No image is pulled or run by these candidate fixtures.
+
 ## Gates still open
 
 - Minimal v4-native SDK/shared 2026.831.0 with Zod 4.6.7 is qualification-only,
@@ -216,11 +262,13 @@ config-route/scheduler qualification, source migration or operational adoption.
   pair remains barred from installation until after 2026-11-09T22:20:56.514Z and
   native age-policy acceptance, without exception. No 1106 package was installed,
   extracted, imported or executed for this read-only comparison.
-- Locate and exercise the privately maintained stock-service harness with the
-  actual supported scheduler/worker-manager/authorization implementation and
-  inert adapters. Prove same-company success and denied-capability, missing
-  identity and cross-company zero unauthorized effects there. This wire harness
-  cannot substitute for it.
+- Prepare and, only after the installation/Security holds clear, exercise the
+  selected disposable stock target through supported local-path lifecycle/APIs.
+  Prove actual scheduler/worker-manager behavior, same-company success and
+  denied-capability, missing-identity and cross-company zero unauthorized effects.
+  If a required caller has no safely reachable trigger/readiness contract, record
+  that exact prerequisite rather than replacing it with mocks or a core patch.
+  This wire harness and another plugin's lifecycle results cannot substitute for it.
 - Exercise actual host config-save/Ajv and manifest-load paths. Passing shared-schema
   or wire/signal probes cannot satisfy these caller boundaries. HTTP byte caps, a
   post-readline character guard, pre-JSON allocation, collection/key/depth bounds and

@@ -5294,6 +5294,18 @@ jobs:
       - name: Exercise the real built worker against the isolated candidate
         run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/built-candidate.mjs . ../../verification/sdk-qualification/candidate
 
+      - name: Typecheck and rebuild unchanged production source against candidate
+        id: candidate-source
+        run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/source-candidate.mjs . ../../verification/sdk-qualification/candidate
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() && steps.candidate-source.outcome != 'skipped' }}
+        with:
+          name: sdk-source-candidate-${{ github.job }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: verification/sdk-qualification/candidate/source-*.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Require unchanged held and candidate dependency sources
         working-directory: .
         run: git diff --exit-code -- plugins/cliproxy-insight/package.json plugins/cliproxy-insight/package-lock.json plugins/model-selection/package.json plugins/model-selection/package-lock.json verification/sdk-qualification/candidate/package.json verification/sdk-qualification/candidate/package-lock.json verification/sdk-qualification/candidate/.npmrc
@@ -5412,6 +5424,18 @@ jobs:
 
       - name: Exercise the real built worker against the isolated candidate
         run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/built-candidate.mjs . ../../verification/sdk-qualification/candidate
+
+      - name: Typecheck and rebuild unchanged production source against candidate
+        id: candidate-source
+        run: node --experimental-import-meta-resolve ../../verification/sdk-qualification/source-candidate.mjs . ../../verification/sdk-qualification/candidate
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() && steps.candidate-source.outcome != 'skipped' }}
+        with:
+          name: sdk-source-candidate-${{ github.job }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: verification/sdk-qualification/candidate/source-*.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Require unchanged held and candidate dependency sources
         working-directory: .
