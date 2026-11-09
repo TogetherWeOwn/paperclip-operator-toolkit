@@ -96,6 +96,7 @@ HEAVY = [
     "mcp-suite",
     "model-selection-impact",
     "model-selection-suite",
+    "plugin-toolchain-qualification",
     "cliproxy-insight-suite",
 ]
 

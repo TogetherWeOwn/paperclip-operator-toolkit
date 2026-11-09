@@ -49,8 +49,11 @@ try {
     const result = spawnSync(process.execPath, [
       join(root, 'node_modules/vitest/vitest.mjs'), 'run', '--root', copy,
       'tests/admission-simulator.spec.ts', '--testNamePattern', 'simulation-only object ownership',
-      '--reporter=json', '--minWorkers=1', '--maxWorkers=1',
-    ], { cwd: copy, encoding: 'utf8', timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+      '--reporter=json', '--pool=forks', '--maxWorkers=1',
+    ], {
+      cwd: copy, encoding: 'utf8', timeout: 30_000, maxBuffer: 8 * 1024 * 1024,
+      env: { ...process.env, VITEST_MAX_WORKERS: '1' },
+    });
     assert.ifError(result.error);
     assert.equal(result.signal, null, `${name}: test process did not finish`);
     let report;

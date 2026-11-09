@@ -2,6 +2,7 @@
 """Pin the merged plugin sweep to change gating and the single aggregator."""
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -28,6 +29,58 @@ class PluginWiring(unittest.TestCase):
                 self.assertIn("needs: [changes]", block)
                 self.assertIn("if: needs.changes.outputs.heavy == 'true'", block)
                 self.assertIn("runs-on: ubuntu-latest", block)
+
+    def test_toolchain_qualification_is_required_and_uses_both_node_versions(self):
+        block = job(self.text, "plugin-toolchain-qualification")
+        self.assertIn("needs: [changes]", block)
+        self.assertIn("if: needs.changes.outputs.heavy == 'true'", block)
+        self.assertIn("timeout-minutes: 30", block)
+        self.assertIn("      - plugin-toolchain-qualification\n", job(self.text, "ci-ok"))
+        qualification = block
+        for required in ("node: ['22', '24']",
+                         "plugin: [model-selection, cliproxy-insight]",
+                         "npm ci --include=dev --ignore-scripts", "qualify-vitest-pools.mjs",
+                         "npm test -- --pool=forks --maxWorkers=2",
+                         "admission-simulator-alias-oracle.mjs", "npm run typecheck", "npm run build"):
+            self.assertIn(required, qualification)
+        self.assertNotIn("continue-on-error", qualification)
+
+    def test_pool_qualification_uses_exit_status_and_complete_trace(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        script = WORKFLOW.parents[2] / "scripts/qualify-vitest-pools.mjs"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tests").mkdir()
+            vitest = root / "node_modules/vitest/vitest.mjs"
+            vitest.parent.mkdir(parents=True)
+            vitest.write_text('''import { appendFileSync } from "node:fs";
+import { join } from "node:path";
+const pool = process.argv.find(arg => arg.startsWith("--pool=")).split("=")[1];
+const trace = join(process.argv.at(-1), `${pool}.jsonl`);
+for (let file = 0; file < Number(process.env.FIXTURE_FILES); file++) {
+  for (const event of ["start", "end"]) {
+    appendFileSync(trace, JSON.stringify({ event, id: "worker", file }) + "\\n");
+  }
+}
+console.log("All fixtures finished successfully");
+process.exit(Number(process.env.FIXTURE_STATUS));
+''')
+            for files, status, accepted in ((4, 0, True), (3, 0, False), (4, 1, False)):
+                with self.subTest(files=files, status=status):
+                    result = subprocess.run(
+                        [node, str(script), str(root)],
+                        env={"FIXTURE_FILES": str(files), "FIXTURE_STATUS": str(status)},
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+                    self.assertEqual(list((root / "tests").iterdir()), [])
+
+    def test_toolchain_failure_reaches_failure_log_drain(self):
+        block = job(self.text, "failure-log-drain")
+        self.assertIn("      - plugin-toolchain-qualification\n", block)
+        self.assertIn("if: failure()", block)
+        self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", block)
 
     def test_scans_are_always_on(self):
         # Neither scan may sit behind the change gate: docs-only changes and
