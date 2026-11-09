@@ -299,7 +299,12 @@ class ConcurrentSubmissionDiagnostics(unittest.TestCase):
                     finally:
                         os.close(ready_fd)
                         os.killpg(child.pid, signal.SIGTERM)
-                        stdout, stderr = child.communicate(timeout=5)
+                        try:
+                            stdout, stderr = child.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(child.pid, signal.SIGKILL)
+                            stdout, stderr = child.communicate(timeout=5)
+                            self.fail("stalled run ignored SIGTERM")
                     result = subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
                 self.assertFalse(scratch.exists(), "disposable evidence must be cleaned")
             else:
@@ -307,6 +312,22 @@ class ConcurrentSubmissionDiagnostics(unittest.TestCase):
             self.assertTrue(saved_dir.is_dir(), result.stdout + result.stderr)
             saved = {p.name: p.read_text() for p in saved_dir.iterdir()}
         return result, saved
+
+    def test_stalled_cleanup_escalates_before_context_exit(self):
+        with mock.patch.object(subprocess, "Popen") as popen, \
+                mock.patch.object(os, "killpg") as killpg, \
+                mock.patch.object(select, "select", return_value=([1], [], [])), \
+                mock.patch.object(os, "read", return_value=b"ready\nready\n"):
+            child = popen.return_value.__enter__.return_value
+            child.pid = 12345
+            child.communicate.side_effect = [
+                subprocess.TimeoutExpired("fixture", 5), ("", "")]
+            with self.assertRaisesRegex(AssertionError, "stalled run ignored SIGTERM"):
+                self.run_concurrency(stalled=True)
+            self.assertEqual(killpg.call_args_list, [
+                mock.call(child.pid, signal.SIGTERM), mock.call(child.pid, signal.SIGKILL)])
+            self.assertEqual(child.communicate.call_args_list, [
+                mock.call(timeout=5), mock.call(timeout=5)])
 
     def test_interrupted_wait_retains_already_produced_child_evidence(self):
         result, saved = self.run_concurrency(stalled=True)
