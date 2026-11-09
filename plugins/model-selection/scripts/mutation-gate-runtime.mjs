@@ -108,27 +108,11 @@ export async function runSequentially(items, run) {
   }
 }
 
-// Vitest 2.1.9 DOES read both variables — resolveConfig applies
-// VITEST_MAX_THREADS to poolOptions.threads/vmThreads and VITEST_MAX_FORKS to
-// poolOptions.forks/vmForks. What makes an env-only cap useless here is which
-// pool those land on: the same file resolves `pool ??= "threads"`, and this
-// plugin's vitest.config.ts sets no `pool`, so VITEST_MAX_FORKS was capping a
-// fork pool that never ran. Measured on the 8-core host with the CI refusal
-// lifted, that env-only configuration still peaked at 10 concurrent vitest
-// processes and was killed by memguard before finishing — the storm this card
-// exists to stop.
-//
-// So the invocation pins `--pool=forks` AND translates the limit into explicit
-// flags. Either alone would be fragile: the flags without the pool would cap an
-// idle pool again, and the env var without the flags depends on a config
-// default that is not ours to hold still.
-// : the default used to be conditional — `if (env.CI !== "true")` — so
-// the cap applied everywhere EXCEPT the one context the refusal above permits.
-// `ci.yml` sets no VITEST_* for the `model-selection suite` job, and that job
-// runs on `[self-hosted, two-selfhosted]`, so bare `{ CI: "true" }` produced
-// `run --pool=forks` with no bound: an uncapped fan-out on a shared runner, on
-// 100% of the runs that can actually happen. The cap is now unconditional and
-// an explicit VITEST_MAX_FORKS/VITEST_MAX_THREADS still wins over it.
+// Pin the pool AND an unconditional worker cap, including CI. The original
+// env-only limit capped an idle pool while the default pool fanned out until
+// memguard killed the run. Vitest 4 removed poolOptions and its per-pool limits;
+// maxWorkers now caps the selected native pool. Keep accepting the old gate
+// inputs, but translate them into the supported CLI and environment controls.
 export const MUTATION_GATE_DEFAULT_FORKS = 2;
 
 // . A single wedged run must not be able to spend the whole job budget.
@@ -162,7 +146,7 @@ export const MUTATION_GATE_OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024;
 // the old code turned that into no flags at all. There is deliberately no way to
 // ask this gate for an uncapped run; that configuration is the defect.
 function forkLimit(env) {
-  for (const raw of [env.VITEST_MAX_FORKS, env.VITEST_MAX_THREADS]) {
+  for (const raw of [env.VITEST_MAX_FORKS, env.VITEST_MAX_THREADS, env.VITEST_MAX_WORKERS]) {
     const limit = Number.parseInt(raw ?? "", 10);
     if (Number.isInteger(limit) && limit > 0) return limit;
   }
@@ -175,7 +159,15 @@ export function mutationGateVitestInvocation(env = process.env) {
   // Both halves carry the SAME resolved number: the flags are what actually
   // bind (see the note above on the idle-pool trap), and the env vars keep any
   // nested vitest the suite itself spawns on the same budget.
-  const childEnv = { ...env, VITEST_MAX_FORKS: `${limit}`, VITEST_MAX_THREADS: `${limit}` };
+  // Vitest 4 replaced the pool-specific environment limits. Its config resolver
+  // reads VITEST_MAX_WORKERS after CLI options, so overwrite a conflicting
+  // inherited value as well as propagating the cap to nested runs.
+  const childEnv = {
+    ...env,
+    VITEST_MAX_FORKS: `${limit}`,
+    VITEST_MAX_THREADS: `${limit}`,
+    VITEST_MAX_WORKERS: `${limit}`,
+  };
 
   const args = [
     "node_modules/vitest/vitest.mjs",
@@ -189,8 +181,6 @@ export function mutationGateVitestInvocation(env = process.env) {
     // waiving the suite; CI (writable workspace) is unaffected either way.
     "--cache=false",
     "--pool=forks",
-    `--poolOptions.forks.maxForks=${limit}`,
-    "--poolOptions.forks.minForks=1",
     `--maxWorkers=${limit}`,
   ];
 

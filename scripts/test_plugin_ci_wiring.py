@@ -29,6 +29,21 @@ class PluginWiring(unittest.TestCase):
                 self.assertIn("if: needs.changes.outputs.heavy == 'true'", block)
                 self.assertIn("runs-on: ubuntu-latest", block)
 
+    def test_toolchain_qualification_is_required_and_uses_both_node_versions(self):
+        block = job(self.text, "plugin-toolchain-qualification")
+        self.assertIn("needs: [changes]", block)
+        self.assertIn("if: needs.changes.outputs.heavy == 'true'", block)
+        self.assertIn("uses: ./.github/workflows/plugin-toolchain.yml", block)
+        self.assertIn("      - plugin-toolchain-qualification\n", job(self.text, "ci-ok"))
+        qualification = WORKFLOW.with_name("plugin-toolchain.yml").read_text()
+        for required in ("workflow_call:", "node: ['22', '24']",
+                         "plugin: [model-selection, cliproxy-insight]",
+                         "npm ci --include=dev --ignore-scripts", "qualify-vitest-pools.mjs",
+                         "npm test -- --pool=forks --maxWorkers=2",
+                         "admission-simulator-alias-oracle.mjs", "npm run typecheck", "npm run build"):
+            self.assertIn(required, qualification)
+        self.assertNotIn("continue-on-error", qualification)
+
     def test_scans_are_always_on(self):
         # Neither scan may sit behind the change gate: docs-only changes and
         # draft PRs must still be scanned. Not a prefix match: any `needs:` or

@@ -5261,6 +5261,13 @@ jobs:
       # It is designed for the operator's environment, not for CI. The operator
       # must run it separately on the archive extract.
 
+  # The patched test toolchain must work at the Node 22 floor and on Node 24,
+  # including native fork/thread pools and the mutation runner's CLI contract.
+  plugin-toolchain-qualification:
+    needs: [changes]
+    if: needs.changes.outputs.heavy == 'true'
+    uses: ./.github/workflows/plugin-toolchain.yml
+
   # The durable per-upstream-provider usage/cooldown telemetry plugin. It polls a
   # sanitized lane read-only and persists what it sees. Its own job, like
   # dispatch-suite: a failure should read as "the cliproxy-insight suite went
@@ -5438,6 +5445,7 @@ jobs:
       - model-selection-impact
       - model-selection-mutants
       - model-selection-suite
+      - plugin-toolchain-qualification
     steps:
       - name: Aggregate gated results
         env:
