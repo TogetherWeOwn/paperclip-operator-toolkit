@@ -25,7 +25,7 @@ WORKFLOW = os.path.join(HERE, ".github", "workflows", "pr-size.yml")
 CENTRAL = "TogetherWeOwn/.github/.github/workflows"
 # Reviewed org main at caller adoption. Repinning the caller requires
 # updating this constant in the same PR.
-REVIEWED_CENTRAL_SHA = "e79d9ecbd94620b0f103edcbe5d705d47a0edceb"
+REVIEWED_CENTRAL_SHA = "86aec407d4fccc8b30ed9f9e484661f5d258239d"
 
 
 def load():
@@ -90,6 +90,13 @@ class PrSizeCallerTest(unittest.TestCase):
         # The gate re-evaluates when an exception is granted or revoked.
         self.assertIn("labeled", pr["types"])
         self.assertIn("unlabeled", pr["types"])
+
+    def test_gate_event_condition(self):
+        self.assertEqual(
+            self.jobs["pr-size-gate"]["if"],
+            "github.event_name == 'pull_request' || "
+            "github.event_name == 'pull_request_review' || inputs.pr_number != ''",
+        )
 
     def test_dispatch_concurrency_is_separate(self):
         group = self.doc["concurrency"]["group"]
