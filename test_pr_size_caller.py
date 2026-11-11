@@ -25,7 +25,7 @@ WORKFLOW = os.path.join(HERE, ".github", "workflows", "pr-size.yml")
 CENTRAL = "TogetherWeOwn/.github/.github/workflows"
 # Reviewed org main at caller adoption. Repinning the caller requires
 # updating this constant in the same PR.
-REVIEWED_CENTRAL_SHA = "a857cbcd193cd17c71f0a86c002e0181d38f1cd7"
+REVIEWED_CENTRAL_SHA = "e79d9ecbd94620b0f103edcbe5d705d47a0edceb"
 
 
 def load():
