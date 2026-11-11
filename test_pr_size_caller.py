@@ -25,7 +25,7 @@ WORKFLOW = os.path.join(HERE, ".github", "workflows", "pr-size.yml")
 CENTRAL = "TogetherWeOwn/.github/.github/workflows"
 # Reviewed org main at caller adoption. Repinning the caller requires
 # updating this constant in the same PR.
-REVIEWED_CENTRAL_SHA = "2ef8ad6447e11d019ac3098bcfd011193b75266a"
+REVIEWED_CENTRAL_SHA = "a857cbcd193cd17c71f0a86c002e0181d38f1cd7"
 
 
 def load():
@@ -82,7 +82,7 @@ class PrSizeCallerTest(unittest.TestCase):
         pr = on["pull_request"]
         self.assertEqual(
             sorted(pr["types"]),
-            ["labeled", "opened", "ready_for_review", "reopened", "synchronize", "unlabeled"],
+            ["edited", "labeled", "opened", "ready_for_review", "reopened", "synchronize", "unlabeled"],
         )
         self.assertEqual(sorted(on["pull_request_review"]["types"]), ["dismissed", "submitted"])
         self.assertEqual(on["schedule"], [{"cron": "17 7 * * 1"}])
@@ -90,6 +90,14 @@ class PrSizeCallerTest(unittest.TestCase):
         # The gate re-evaluates when an exception is granted or revoked.
         self.assertIn("labeled", pr["types"])
         self.assertIn("unlabeled", pr["types"])
+
+    def test_dispatch_concurrency_is_separate(self):
+        group = self.doc["concurrency"]["group"]
+        self.assertIn("github.event_name == 'workflow_dispatch' && '-dispatch'", group)
+        self.assertEqual(
+            self.doc["concurrency"]["cancel-in-progress"],
+            "${{ github.event_name == 'pull_request' }}",
+        )
 
     def test_exclude_extra(self):
         # This repo has no generated paths beyond the script defaults
