@@ -1209,6 +1209,11 @@ jobs:
       - name: escape ledger linkage suite
         run: python3 -I -m unittest discover -s ops/kpi -p 'test_*.py' -v
 
+      # PR-size caller wiring: the labeller stays advisory, the gate is the
+      # one required exception, all three reusables pin to one reviewed SHA.
+      - name: pr-size caller wiring suite
+        run: python3 -m unittest -v test_pr_size_caller.py
+
       # Blocker-ledger classes 4-7: deterministic pre-review gates
       # (migration, API contract, concurrency, lockfile). Logic is stdlib;
       # acceptance parses delivered workflows with the pinned PyYAML above.
